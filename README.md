@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Room Ledger 2.0
 React + TypeScript + TanStack Start + Tailwind, **Firebase** (Firestore/Auth), receipts in **Supabase Storage**. See `SETUP.md`.
 
@@ -18,3 +19,6 @@ Fill in `.env` (template included; see `SETUP.md`), then `npm install && npm run
 1. Sign in as two roommates (two browsers). 2. Add ₹1,200 shared grocery equal across 4 → each vault −₹300. 3. Edit to ₹800 → vaults update once. 4. Pay ₹500 of a ₹1,500 debt → remaining ₹1,000; reverse it → ₹1,500. 5. Change electricity rate for next month; last month's bill is unchanged. 6. Toggle dark mode; reload (no flash).
 
 `npm test` runs 13 tests (splits, rounding, wallet, settlement, rates, fixed charges, legacy-data migration).
+=======
+# room-ledger
+>>>>>>> d3bb04ab36a8bf1be168635b1d64cfedcb1c458c
