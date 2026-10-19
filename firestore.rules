@@ -1,0 +1,91 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function memberPath() { return /databases/$(database)/documents/members/$(request.auth.uid); }
+    function isMember() { return signedIn() && exists(memberPath()); }
+    function myId() { return get(memberPath()).data.roommateId; }
+    function isAdmin() {
+      return isMember() && get(/databases/$(database)/documents/roommates/$(myId())).data.role == 'admin';
+    }
+    function money(v) { return v is int && v >= 0; }
+
+    // Roommate profiles. Created/removed only by the migration script (Admin SDK).
+    match /roommates/{rid} {
+      allow read: if signedIn();
+      allow create, delete: if false;
+      allow update: if isAdmin()
+        // a member may change only their own UPI id
+        || (isMember() && myId() == rid
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['upiId']))
+        // one-time claim of an unlinked profile by the signed-in account
+        || (signedIn() && resource.data.authUid == null
+            && request.resource.data.authUid == request.auth.uid
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['authUid']));
+    }
+
+    // Maps a Firebase account to exactly one roommate.
+    match /members/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow create: if signedIn() && request.auth.uid == uid
+        && get(/databases/$(database)/documents/roommates/$(request.resource.data.roommateId)).data.authUid == null
+        && getAfter(/databases/$(database)/documents/roommates/$(request.resource.data.roommateId)).data.authUid == uid;
+      allow update, delete: if false;
+    }
+
+    // Household configuration: everyone reads, admins write. Rate/charge history is never deleted.
+    match /settings/{id} { allow read: if isMember(); allow write: if isAdmin(); }
+    match /rates/{id} {
+      allow read: if isMember();
+      allow create: if isAdmin() && money(request.resource.data.ratePaise) && request.resource.data.ratePaise > 0;
+      allow update, delete: if false;
+    }
+    // Rent / cleaning / water are defined in the app code (src/lib/fixed.ts); the app never writes this collection.
+    match /fixedCharges/{id} { allow read: if isMember(); allow write: if false; }
+    match /categories/{id} { allow read: if isMember(); allow create, update: if isAdmin(); allow delete: if false; }
+    match /allocations/{id} {
+      allow read: if isMember();
+      allow create, update: if isAdmin() && money(request.resource.data.amountPaise);
+      allow delete: if false;
+    }
+
+    match /expenses/{id} {
+      allow read: if isMember();
+      allow create: if isMember() && request.resource.data.amountPaise is int && request.resource.data.amountPaise > 0
+        && request.resource.data.createdBy == myId() && request.resource.data.version == 1;
+      allow update: if isMember() && request.resource.data.amountPaise is int && request.resource.data.amountPaise > 0
+        && request.resource.data.version == resource.data.version + 1
+        && request.resource.data.createdBy == resource.data.createdBy;
+      allow delete: if isMember();
+    }
+    match /utilityBills/{id} {
+      allow read: if isMember();
+      allow create: if isMember() && money(request.resource.data.amountPaise);
+      allow update: if false;
+      allow delete: if isMember();
+    }
+    match /walletEntries/{id} {
+      allow read: if isMember();
+      allow create, update: if isMember() && request.resource.data.amountPaise is int && request.resource.data.amountPaise > 0;
+      allow delete: if isMember();
+    }
+    match /payments/{id} {
+      allow read: if isMember();
+      allow create: if isMember() && request.resource.data.amountPaise is int && request.resource.data.amountPaise > 0
+        && request.resource.data.createdBy == myId() && request.resource.data.verified == false;
+      // The only permitted edit is flagging a payment as reversed, once.
+      allow update: if isMember() && resource.data.reversedById == null
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reversedById']);
+      allow delete: if false;
+    }
+    match /months/{id} { allow read: if isMember(); allow write: if isMember(); }
+
+    // Append-only audit trail.
+    match /audit/{id} {
+      allow read: if isMember();
+      allow create: if isMember() && request.resource.data.actorId == myId();
+      allow update, delete: if false;
+    }
+  }
+}

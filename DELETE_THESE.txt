@@ -1,0 +1,20 @@
+Delete these files/folders from your existing project BEFORE copying the update over it:
+package-lock.json
+src/components/MonthPicker.tsx
+src/integrations/supabase/auth-attacher.ts
+src/integrations/supabase/auth-middleware.ts
+src/integrations/supabase/client.server.ts
+src/integrations/supabase/client.ts
+src/integrations/supabase/cron-auth.ts
+src/integrations/supabase/previewAuthStorage.ts
+src/integrations/supabase/types.ts
+src/lib/room.ts
+src/lib/useMonth.ts
+supabase/config.toml
+supabase/migrations/20260902052120_be2541ce-2dc2-4b54-a867-07bf68af5614.sql
+supabase/migrations/20260903025358_16631771-40ec-4c85-98ba-2f8fe0a0aa4b.sql
+supabase/migrations/20260903120000_link_utility_bills_to_expenses.sql
+supabase/migrations/20260903150000_add_receipts.sql
+supabase/migrations/20260904000000_settlement_history.sql
+
+Also delete package-lock.json (then run npm install). Your OLD .env (Supabase-only keys) is replaced by the new .env template in this zip — fill it in using the comments inside.
