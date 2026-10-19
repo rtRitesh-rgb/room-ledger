@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { collection, getDocs } from "firebase/firestore";
-import { Home, Receipt, HandCoins, Users, Plus, Sun, Moon, Monitor, LogOut, Loader2, Wallet } from "lucide-react";
+import { Home, Receipt, HandCoins, Users, Plus, Sun, Moon, Monitor, LogOut, Loader2, Wallet, Download } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,6 +13,7 @@ import { C, claimRoommate, fromDoc } from "@/lib/db";
 import { db, firebaseConfigured } from "@/lib/firebase";
 import { SessionProvider, useSession } from "@/lib/session";
 import { useTheme, type ThemePref } from "@/lib/theme";
+import { useInstallPrompt } from "@/lib/pwa";
 import type { Roommate } from "@/lib/ledger";
 
 const NAV = [
@@ -43,6 +44,23 @@ export function ThemeToggle({ full }: { full?: boolean }) {
     <button type="button" onClick={() => set(next)} aria-label={`Theme: ${pref}. Switch to ${next}`} className="press grid size-11 place-items-center rounded-full border border-border bg-card hover:bg-muted">
       <Icon className="size-4" />
     </button>
+  );
+}
+
+/** Shows only when the app can be installed (native prompt, or iOS where it's a manual Share-sheet step). */
+export function InstallAppButton({ full }: { full?: boolean }) {
+  const { canInstall, iosHint, install } = useInstallPrompt();
+  if (!canInstall && !iosHint) return null;
+  const onClick = () => {
+    if (canInstall) void install();
+    else toast("Install Room Ledger", { description: "Tap the Share button, then “Add to Home Screen”." });
+  };
+  if (full)
+    return (
+      <Button type="button" variant="outline" onClick={onClick} className="h-11 w-full justify-start gap-2"><Download className="size-4" />Install app</Button>
+    );
+  return (
+    <button type="button" onClick={onClick} aria-label="Install app" className="press grid size-11 place-items-center rounded-full border border-border bg-card hover:bg-muted"><Download className="size-4" /></button>
   );
 }
 
@@ -133,6 +151,7 @@ function AppFrame({ children }: { children: ReactNode }) {
           ))}
         </nav>
         <div className="mt-auto space-y-3">
+          <InstallAppButton full />
           <ThemeToggle full />
           <div className="flex items-center gap-2"><Avatar name={me?.name ?? "?"} /><span className="flex-1 truncate text-sm font-semibold">{me?.name}</span>
             <button type="button" aria-label="Sign out" onClick={() => void signOut()} className="grid size-11 place-items-center rounded-full hover:bg-muted"><LogOut className="size-4" /></button></div>
@@ -141,7 +160,7 @@ function AppFrame({ children }: { children: ReactNode }) {
 
       <header className="sticky top-0 z-30 flex items-center justify-between border-b border-border bg-background/90 px-4 py-2 backdrop-blur md:hidden">
         <Brand />
-        <ThemeToggle />
+        <div className="flex items-center gap-2"><InstallAppButton /><ThemeToggle /></div>
       </header>
 
       <main className="mx-auto w-full max-w-5xl px-4 pb-32 pt-5 md:px-8 md:pb-10 md:pt-8">
