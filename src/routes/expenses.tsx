@@ -10,7 +10,7 @@ import { CategoryChip } from "@/components/CategoryPicker";
 import { useDialogs } from "@/components/dialogs";
 import { useLedger } from "@/lib/data";
 import { deleteUtilityBill } from "@/lib/db";
-import { categoryTotals, type Expense } from "@/lib/ledger";
+import { categoryTotals, dayHeading, shortDate, type Expense } from "@/lib/ledger";
 import { formatMilli, formatPaise } from "@/lib/money";
 
 export const Route = createFileRoute("/expenses")({
@@ -49,6 +49,14 @@ function ExpensesPage() {
     return list.sort(by[sort]);
   }, [visible, tab, q, cat, payer, sort, nameOf]);
 
+  // Date-sorted views are grouped under day headings (with a daily total); amount sorts stay a flat list.
+  const byDate = sort === "newest" || sort === "oldest";
+  const groups = useMemo<[string, Expense[]][]>(() => {
+    if (!byDate) return [["", rows]];
+    const out: [string, Expense[]][] = [];
+    for (const e of rows) { const last = out[out.length - 1]; if (last && last[0] === e.spentOn) last[1].push(e); else out.push([e.spentOn, [e]]); }
+    return out;
+  }, [rows, byDate]);
   const total = rows.reduce((s, e) => s + e.amountPaise, 0);
   const cats = categoryTotals(rows).slice(0, 4);
   const usedCats = categories.filter((c) => visible.some((e) => e.categoryId === c.id));
@@ -98,26 +106,33 @@ function ExpensesPage() {
       ) : rows.length === 0 ? (
         <div className="panel mt-4"><EmptyState title={q || cat !== "all" || payer !== "all" ? "No matches" : "No expenses yet"} body="Try a different filter, or add one." action={<Button className="bg-grad-primary text-white" onClick={addExpense}>Add expense</Button>} /></div>
       ) : (
-        <ul className="mt-4 space-y-2">
-          {rows.map((e) => {
-            const c = categories.find((x) => x.id === e.categoryId);
-            const mine = me ? e.shares[me.id] : undefined;
-            return (
-              <li key={e.id}>
-                <button type="button" disabled={e.kind === "utility"} onClick={() => editExpense(e)} className="panel press flex w-full items-center gap-3 p-3 text-left hover:border-primary/40 disabled:cursor-default">
-                  <CategoryChip category={c ?? { icon: "Receipt", color: "#5B5FEF" }} />
-                  <span className="min-w-0 flex-1">
-                    <span className="flex items-center gap-1.5"><span className="truncate font-semibold">{e.name}</span>{e.receiptUrl ? <Paperclip className="size-3.5 shrink-0 text-muted-foreground" aria-label="Has receipt" /> : null}</span>
-                    <span className="block truncate text-xs text-muted-foreground">{e.categoryLabel} · {e.spentOn.slice(5)} · paid by {nameOf(e.payerId)}</span>
-                    <span className="mt-1 flex gap-1.5">{e.isPersonal ? <StatusBadge tone="muted">Personal</StatusBadge> : e.kind === "utility" ? <StatusBadge tone="info">Utility</StatusBadge> : <StatusBadge tone="info">Shared · {Object.keys(e.shares).length}</StatusBadge>}</span>
-                  </span>
-                  <span className="text-right"><Money paise={e.amountPaise} className="block font-extrabold" />{mine !== undefined && !e.isPersonal ? <span className="num text-xs text-muted-foreground">your share {formatPaise(mine)}</span> : null}</span>
-                </button>
-                {e.receiptUrl ? <a href={e.receiptUrl} target="_blank" rel="noreferrer noopener" className="ml-4 inline-block py-1 text-xs font-semibold text-primary">View receipt</a> : null}
-              </li>
-            );
-          })}
-        </ul>
+        <div className="mt-4 space-y-4">
+          {groups.map(([date, list]) => (
+            <section key={date} aria-label={dayHeading(date)}>
+              {byDate ? <h2 className="num sticky top-[3.75rem] z-10 mb-1.5 flex items-center justify-between bg-background/95 py-1.5 text-xs font-bold text-muted-foreground backdrop-blur md:top-0"><span>{dayHeading(date)} · {shortDate(date)}</span><Money paise={list.reduce((s, e) => s + e.amountPaise, 0)} /></h2> : null}
+              <ul className="space-y-2">
+                {list.map((e) => {
+                  const c = categories.find((x) => x.id === e.categoryId);
+                  const mine = me ? e.shares[me.id] : undefined;
+                  return (
+                    <li key={e.id}>
+                      <button type="button" disabled={e.kind === "utility"} onClick={() => editExpense(e)} className="panel press flex w-full items-center gap-3 p-3 text-left hover:border-primary/40 disabled:cursor-default">
+                        <CategoryChip category={c ?? { icon: "Receipt", color: "#5B5FEF" }} />
+                        <span className="min-w-0 flex-1">
+                          <span className="flex items-center gap-1.5"><span className="truncate font-semibold">{e.name}</span>{e.receiptUrl ? <Paperclip className="size-3.5 shrink-0 text-muted-foreground" aria-label="Has receipt" /> : null}</span>
+                          <span className="block truncate text-xs text-muted-foreground">{e.categoryLabel}{byDate ? "" : ` · ${shortDate(e.spentOn)}`} · paid by {nameOf(e.payerId)}</span>
+                          <span className="mt-1 flex gap-1.5">{e.isPersonal ? <StatusBadge tone="muted">Personal · only you</StatusBadge> : e.kind === "utility" ? <StatusBadge tone="info">Utility</StatusBadge> : <StatusBadge tone="info">Shared · {Object.keys(e.shares).length}</StatusBadge>}</span>
+                        </span>
+                        <span className="text-right"><Money paise={e.amountPaise} className="block font-extrabold" />{mine !== undefined && !e.isPersonal ? <span className="num text-xs text-muted-foreground">your share {formatPaise(mine)}</span> : null}</span>
+                      </button>
+                      {e.receiptUrl ? <a href={e.receiptUrl} target="_blank" rel="noreferrer noopener" className="ml-4 inline-block py-1 text-xs font-semibold text-primary">View receipt</a> : null}
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
+          ))}
+        </div>
       )}
     </div>
   );

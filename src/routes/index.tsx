@@ -6,10 +6,11 @@ import { Button } from "@/components/ui/button";
 import { Avatar, EmptyState, LoadingBlock, Money, MonthSwitcher, ProgressBar, StatCard, StatusBadge, cx } from "@/components/kit";
 import { CategoryChip } from "@/components/CategoryPicker";
 import { useDialogs } from "@/components/dialogs";
+import { DailyLimitCard } from "@/components/DailyLimit";
 import { useLedger } from "@/lib/data";
 import { formatPaise } from "@/lib/money";
 import {
-  buildBalances, categoryTotals, duesObligations, expenseObligations, householdTotal, monthLabel, personMonthStats, vaultSummary,
+  buildBalances, categoryTotals, duesObligations, expenseObligations, householdTotal, monthLabel, personMonthStats, shortDate, vaultSummary,
 } from "@/lib/ledger";
 
 export const Route = createFileRoute("/")({
@@ -50,8 +51,9 @@ function HomePage() {
     return Array.from({ length: last }, (_, i) => ({ day: i + 1, rupees: (days.get(i + 1) ?? 0) / 100 }));
   }, [expenses, month]);
 
-  const people = roommates.map((r) => ({ name: r.name, rupees: (calc.stats[r.id]?.total ?? 0) / 100 }));
-  const recent = [...expenses].filter((e) => !e.isPersonal || e.payerId === me?.id).sort((a, b) => b.spentOn.localeCompare(a.spentOn) || b.createdAtMs - a.createdAtMs).slice(0, 5);
+  // Personal spending is private, so the comparison only counts shared, utility and fixed shares.
+  const people = roommates.map((r) => { const st = calc.stats[r.id]; return { name: r.name, rupees: ((st?.shared ?? 0) + (st?.utility ?? 0) + (st?.fixed ?? 0)) / 100 }; });
+  const recent = [...expenses].filter((e) => !e.isPersonal || e.payerId === me?.id).sort((a, b) => b.spentOn.localeCompare(a.spentOn) || b.createdAtMs - a.createdAtMs).slice(0, 6);
   const myOpen = calc.open.filter((b) => b.fromId === me?.id || b.toId === me?.id).slice(0, 4);
   const hour = new Date().getHours();
   const greet = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
@@ -62,13 +64,13 @@ function HomePage() {
 
   return (
     <div className="space-y-5">
-      <section className="hero bg-grad-hero rounded-3xl p-5 shadow-lift md:p-7" aria-label="Your Personal Vault">
+      <section className="hero bg-grad-hero rounded-3xl p-4 shadow-lift md:p-7" aria-label="Your wallet">
         <div className="relative flex flex-wrap items-start justify-between gap-3">
           <div><p className="text-sm text-white/75">{greet}, {me?.name}</p><p className="text-xs text-white/60">{monthLabel(month)}</p></div>
           <MonthSwitcher className="!border-white/20 !bg-white/10 text-white [&_button:hover]:!bg-white/15" />
         </div>
         <div className="relative mt-5">
-          <p className="text-xs font-semibold uppercase tracking-wider text-white/70">Vault remaining</p>
+          <p className="text-xs font-semibold uppercase tracking-wider text-white/70">My wallet left</p>
           <p className="num text-4xl font-extrabold md:text-5xl" aria-live="polite">{formatPaise(vault?.remaining ?? 0)}</p>
           <div className="mt-3 max-w-md">
             <ProgressBar value={vault?.utilisation === Infinity ? 1 : (vault?.utilisation ?? 0)} tone={vault?.status ?? "ok"} />
@@ -77,8 +79,21 @@ function HomePage() {
               <span className="font-semibold">{vault && vault.available > 0 ? `${Math.round(Math.min(vault.utilisation, 9.99) * 100)}%` : "—"} · {tip}</span>
             </div>
           </div>
-          <Button onClick={addExpense} className="mt-5 h-11 bg-white text-[#4448d9] hover:bg-white/90"><Plus className="mr-1.5 size-4" />Add expense</Button>
         </div>
+      </section>
+
+      <DailyLimitCard />
+
+      <section className="grid grid-cols-3 gap-2" aria-label="Quick actions">
+        {[
+          { label: "Expense", icon: Plus, on: addExpense },
+          { label: "Meter", icon: Zap, on: addUtility },
+          { label: "Pay / Settle", icon: HandCoins, on: () => { const b = myOpen.find((x) => x.fromId === me?.id); if (b) pay(b); else void navigate({ to: "/settlement" }); } },
+        ].map((a) => (
+          <button key={a.label} type="button" onClick={a.on} className="tile press flex min-h-[4.5rem] flex-col items-center justify-center gap-1.5 text-xs font-semibold hover:bg-muted">
+            <a.icon className="size-5 text-primary" aria-hidden />{a.label}
+          </button>
+        ))}
       </section>
 
       <section className="grid grid-cols-2 gap-3 md:grid-cols-4" aria-label="Financial overview">
@@ -86,18 +101,6 @@ function HomePage() {
         <StatCard label="Your share" value={<Money paise={myStats?.total ?? 0} />} hint="Incl. personal" />
         <StatCard label="You owe" value={<Money paise={calc.owe} />} tone={calc.owe > 0 ? "warning" : "default"} hint={calc.owe > 0 ? "Pending" : "All clear"} />
         <StatCard label="You are owed" value={<Money paise={calc.owed} />} tone={calc.owed > 0 ? "success" : "default"} hint={calc.owed > 0 ? "To receive" : "Nothing pending"} />
-      </section>
-
-      <section className="grid grid-cols-3 gap-2" aria-label="Quick actions">
-        {[
-          { label: "Expense", icon: Plus, on: addExpense },
-          { label: "Meter reading", icon: Zap, on: addUtility },
-          { label: "Payment", icon: HandCoins, on: () => { const b = myOpen.find((x) => x.fromId === me?.id); if (b) pay(b); else void navigate({ to: "/settlement" }); } },
-        ].map((a) => (
-          <button key={a.label} type="button" onClick={a.on} className="tile press flex min-h-16 flex-col items-center justify-center gap-1 text-xs font-semibold hover:bg-muted">
-            <a.icon className="size-5 text-primary" aria-hidden />{a.label}
-          </button>
-        ))}
       </section>
 
       <div className="grid gap-5 lg:grid-cols-2">
@@ -133,6 +136,24 @@ function HomePage() {
           </ul>
         </section>
       </div>
+
+      <section className="panel p-4">
+        <div className="mb-2 flex items-center justify-between"><h2 className="font-bold">Recent transactions</h2><Link to="/expenses" className="flex items-center gap-1 text-sm font-semibold text-primary">All <ArrowRight className="size-3.5" /></Link></div>
+        {recent.length === 0 ? <EmptyState title="No expenses this month" action={<Button className="bg-grad-primary text-white" onClick={addExpense}>Add the first one</Button>} /> : (
+          <ul className="divide-y divide-border">
+            {recent.map((e) => {
+              const cat = categories.find((c) => c.id === e.categoryId);
+              return (
+                <li key={e.id} className="flex min-h-16 items-center gap-3 py-2">
+                  <CategoryChip category={cat ?? { icon: "Receipt", color: "#5B5FEF" }} />
+                  <div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold">{e.name}</p><p className="truncate text-xs text-muted-foreground">{e.categoryLabel} · {shortDate(e.spentOn)} · {nameOf(e.payerId)}</p></div>
+                  <Money paise={e.amountPaise} className="font-bold" />
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
 
       <div className="grid gap-5 lg:grid-cols-2">
         <section className="panel p-4" aria-label="Spending by day">
@@ -172,7 +193,7 @@ function HomePage() {
       </div>
 
       <section className="panel p-4" aria-label="Roommate comparison">
-        <h2 className="mb-3 font-bold">Roommate comparison</h2>
+        <h2 className="mb-3 font-bold">Shared share by roommate</h2>
         <div className="h-40" role="img" aria-label={`Total attributed spending: ${people.map((p) => `${p.name} ${formatPaise(Math.round(p.rupees * 100))}`).join(", ")}`}>
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={people} layout="vertical" margin={{ left: 8, right: 16 }}>
@@ -184,23 +205,6 @@ function HomePage() {
         </div>
       </section>
 
-      <section className="panel p-4">
-        <div className="mb-2 flex items-center justify-between"><h2 className="font-bold">Recent transactions</h2><Link to="/expenses" className="flex items-center gap-1 text-sm font-semibold text-primary">All <ArrowRight className="size-3.5" /></Link></div>
-        {recent.length === 0 ? <EmptyState title="No expenses this month" action={<Button className="bg-grad-primary text-white" onClick={addExpense}>Add the first one</Button>} /> : (
-          <ul className="divide-y divide-border">
-            {recent.map((e) => {
-              const cat = categories.find((c) => c.id === e.categoryId);
-              return (
-                <li key={e.id} className="flex min-h-16 items-center gap-3 py-2">
-                  <CategoryChip category={cat ?? { icon: "Receipt", color: "#5B5FEF" }} />
-                  <div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold">{e.name}</p><p className="truncate text-xs text-muted-foreground">{e.categoryLabel} · {e.spentOn.slice(5)} · {nameOf(e.payerId)}</p></div>
-                  <Money paise={e.amountPaise} className="font-bold" />
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </section>
     </div>
   );
 }

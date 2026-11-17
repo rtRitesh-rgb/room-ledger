@@ -41,17 +41,27 @@ service cloud.firestore {
       allow create: if isAdmin() && money(request.resource.data.ratePaise) && request.resource.data.ratePaise > 0;
       allow update, delete: if false;
     }
-    // Rent / cleaning / water are defined in the app code (src/lib/fixed.ts); the app never writes this collection.
-    match /fixedCharges/{id} { allow read: if isMember(); allow write: if false; }
-    match /categories/{id} { allow read: if isMember(); allow create, update: if isAdmin(); allow delete: if false; }
-    match /allocations/{id} {
+    // Rent / cleaning / water / other fixed charges. Built-in defaults live in src/lib/fixed.ts; admins save new versions here
+    // (one doc per charge per effective month, so history is kept and nothing is deleted).
+    match /fixedCharges/{id} {
       allow read: if isMember();
-      allow create, update: if isAdmin() && money(request.resource.data.amountPaise);
+      allow create, update: if isAdmin() && money(request.resource.data.amountPaise)
+        && request.resource.data.effectiveMonth is string && request.resource.data.name is string;
+      allow delete: if false;
+    }
+    match /categories/{id} { allow read: if isMember(); allow create, update: if isAdmin(); allow delete: if false; }
+    // PRIVATE WALLET: only the owner can read or edit their own monthly allocation (doc id = month_roommateId).
+    match /allocations/{id} {
+      allow read: if isMember() && resource.data.roommateId == myId();
+      allow create, update: if isMember() && money(request.resource.data.amountPaise)
+        && request.resource.data.roommateId == myId()
+        && id == request.resource.data.month + '_' + myId();
       allow delete: if false;
     }
 
     match /expenses/{id} {
-      allow read: if isMember();
+      // Personal expenses are visible only to the person who made them; shared ones to every member.
+      allow read: if isMember() && (resource.data.isPersonal == false || resource.data.payerId == myId());
       allow create: if isMember() && request.resource.data.amountPaise is int && request.resource.data.amountPaise > 0
         && request.resource.data.createdBy == myId() && request.resource.data.version == 1;
       allow update: if isMember() && request.resource.data.amountPaise is int && request.resource.data.amountPaise > 0
@@ -65,8 +75,10 @@ service cloud.firestore {
       allow update: if false;
       allow delete: if isMember();
     }
+    // PRIVATE WALLET: entries are readable only by their owner. Any member may write them because saving a shared
+    // expense creates one entry per participant.
     match /walletEntries/{id} {
-      allow read: if isMember();
+      allow read: if isMember() && resource.data.roommateId == myId();
       allow create, update: if isMember() && request.resource.data.amountPaise is int && request.resource.data.amountPaise > 0;
       allow delete: if isMember();
     }
@@ -83,7 +95,7 @@ service cloud.firestore {
 
     // Append-only audit trail.
     match /audit/{id} {
-      allow read: if isMember();
+      allow read: if isMember() && (isAdmin() || resource.data.actorId == myId());
       allow create: if isMember() && request.resource.data.actorId == myId();
       allow update, delete: if false;
     }

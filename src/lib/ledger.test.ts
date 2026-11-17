@@ -144,3 +144,21 @@ test("formatting", () => {
   assert.equal(formatPaise(120000), "₹1,200");
   assert.equal(formatPaise(12050), "₹120.50");
 });
+
+test("daily limit: month budget ÷ days, fixed charges taken off the top", async () => {
+  const { dailyLimit } = await import("./ledger.ts");
+  const mk = (id: string, type: "shared" | "fixed", amt: number, date: string) => ({ id, month: "2026-11", roommateId: "a", type, refId: id, label: id, amountPaise: amt, date });
+  const entries = [mk("rent", "fixed", 400000, "2026-11-01"), mk("x", "shared", 30000, "2026-11-09"), mk("y", "shared", 20000, "2026-11-10")];
+  const d = dailyLimit({ available: 1500000 }, entries, "2026-11", "2026-11-10");
+  assert.equal(d.days, 30);
+  assert.equal(d.budget, 1100000); // 15000 − 4000 rent
+  assert.equal(d.perDay, Math.floor(1100000 / 30));
+  assert.equal(d.spentToday, 20000);
+  assert.equal(d.daysLeft, 21);
+  assert.equal(d.allowanceToday, Math.floor((1100000 - 30000) / 21));
+  assert.equal(d.leftToday, d.allowanceToday - 20000);
+  assert.equal(d.status, "ok");
+  assert.equal(dailyLimit({ available: 1500000 }, entries, "2026-11", "2026-11-10", true).budget, 1500000);
+  assert.equal(dailyLimit({ available: 0 }, [], "2026-11", "2026-11-10").status, "unset");
+  assert.equal(dailyLimit({ available: 100000 }, entries, "2026-11", "2026-11-10").status, "over");
+});

@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "test": "node --test src/lib/ledger.test.ts src/lib/fixed.test.ts scripts/transform.test.mjs scripts/fix-fixed-charges.test.mjs",
+    "test": "node --test src/lib/ledger.test.ts src/lib/calc.test.ts src/lib/fixed.test.ts scripts/transform.test.mjs scripts/fix-fixed-charges.test.mjs",
     "typecheck": "tsc --noEmit",
     "migrate": "node scripts/migrate-supabase-to-firestore.mjs"
   },

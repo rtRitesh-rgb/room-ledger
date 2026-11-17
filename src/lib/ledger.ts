@@ -418,3 +418,77 @@ export function categoryTotals(expenses: Expense[]): { categoryId: string; label
   }
   return [...m.values()].sort((a, b) => b.total - a.total);
 }
+
+// ───────────────────────── Daily spending limit ─────────────────────────
+
+export const daysInMonth = (m: string) => new Date(Number(m.slice(0, 4)), Number(m.slice(5, 7)), 0).getDate();
+
+export type DailyLimit = {
+  /** Month budget the limit is built from (allocation + carry, minus fixed charges unless included). */
+  budget: Paise;
+  days: number;
+  /** Static target: budget ÷ days in month. */
+  perDay: Paise;
+  spentToday: Paise;
+  spentMonth: Paise;
+  /** Day number we treat as "today" (1..days; 0 = month hasn't started; days+1 = month over). */
+  dayNo: number;
+  daysLeft: number;
+  /** What you can still spend today: (budget − spent before today) ÷ days left, minus spent today. May be negative. */
+  leftToday: Paise;
+  /** Today's allowance after re-spreading what's left over the remaining days. */
+  allowanceToday: Paise;
+  status: "unset" | "ok" | "near" | "over";
+  isCurrent: boolean;
+};
+
+/**
+ * Splits the month's wallet money into equal days and tracks today against it.
+ * Fixed charges (rent etc.) are committed up-front, so by default they are taken off the budget instead of
+ * wrecking day 1; pass includeFixed to count them as ordinary spending.
+ */
+export function dailyLimit(summary: Pick<VaultSummary, "available">, entries: WalletEntry[], month: string, todayISO: string, includeFixed = false): DailyLimit {
+  const days = daysInMonth(month);
+  const mine = entries.filter((e) => e.month === month);
+  const counted = mine.filter((e) => includeFixed || e.type !== "fixed");
+  const fixedTotal = includeFixed ? 0 : sumBy(mine.filter((e) => e.type === "fixed"), (e) => e.amountPaise);
+  const budget = summary.available - fixedTotal;
+
+  const isCurrent = todayISO.slice(0, 7) === month;
+  const dayNo = isCurrent ? Number(todayISO.slice(8, 10)) : todayISO.slice(0, 7) > month ? days + 1 : 0;
+  const todayStr = `${month}-${String(Math.min(Math.max(dayNo, 1), days)).padStart(2, "0")}`;
+  const spentMonth = sumBy(counted, (e) => e.amountPaise);
+  const spentToday = isCurrent ? sumBy(counted.filter((e) => e.date === todayStr), (e) => e.amountPaise) : 0;
+  const daysLeft = dayNo === 0 ? days : Math.max(0, days - dayNo + 1);
+  const spentBefore = spentMonth - spentToday;
+  const allowanceToday = daysLeft > 0 ? Math.floor((budget - spentBefore) / daysLeft) : 0;
+  const perDay = Math.floor(budget / days);
+  const leftToday = allowanceToday - spentToday;
+
+  const status: DailyLimit["status"] = summary.available <= 0 && spentMonth === 0 ? "unset" : budget - spentMonth < 0 || (isCurrent && leftToday < 0) ? "over" : isCurrent && allowanceToday > 0 && leftToday < allowanceToday * 0.2 ? "near" : "ok";
+  return { budget, days, perDay, spentToday, spentMonth, dayNo, daysLeft, leftToday, allowanceToday, status, isCurrent };
+}
+
+/** Today's date as yyyy-mm-dd in the phone's own timezone (toISOString would be UTC, i.e. "yesterday" before 5:30am in India). */
+export function todayISO(d = new Date()): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/** "12 Nov" */
+export const shortDate = (iso: string) => (iso ? `${Number(iso.slice(8, 10))} ${MON[Number(iso.slice(5, 7)) - 1] ?? ""}` : "");
+
+/** "Today", "Yesterday" or "Wed, 12 Nov" for list headings. */
+export function dayHeading(iso: string, today = todayISO()): string {
+  if (iso === today) return "Today";
+  const y = new Date(`${today}T00:00:00`);
+  y.setDate(y.getDate() - 1);
+  if (iso === todayISO(y)) return "Yesterday";
+  const d = new Date(`${iso}T00:00:00`);
+  return `${DOW[d.getDay()]}, ${shortDate(iso)}`;
+}
+
+/** Newest date first; items without a date go last. Stable for equal dates. */
+export const byDateDesc = <T extends { date: string }>(xs: T[]): T[] => [...xs].sort((a, b) => (a.date === b.date ? 0 : !a.date ? 1 : !b.date ? -1 : b.date.localeCompare(a.date)));

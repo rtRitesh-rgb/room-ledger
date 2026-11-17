@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState, type ReactNode } from "react";
-import { ChevronDown, ChevronUp, Pencil, Plus } from "lucide-react";
+import { ChevronDown, ChevronUp, Lock, Pencil, Plus } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,22 +9,24 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Avatar, EmptyState, LoadingBlock, MonthField, Money, NativeSelect, PageHeader, ProgressBar, ResponsiveSheet, StatusBadge, cx } from "@/components/kit";
 import { CategoryChip } from "@/components/CategoryPicker";
+import { AmountInput } from "@/components/AmountInput";
+import { DailyLimitCard } from "@/components/DailyLimit";
 import { ICON_NAMES } from "@/components/category-icons";
 import { ThemeToggle } from "@/components/Shell";
 import { useLedger } from "@/lib/data";
-import { addRate, saveCategory, saveSettings, setAllocation, setManager, updateMyUpi } from "@/lib/db";
-import { FIXED_CHARGES, FIXED_EACH_PAISE, FIXED_TOTAL_PAISE, eachPaise } from "@/lib/fixed";
+import { addRate, saveCategory, saveFixedCharge, saveSettings, setAllocation, setManager, updateMyUpi } from "@/lib/db";
+import { evalAmount } from "@/lib/calc";
 import { useSession } from "@/lib/session";
 import { CATEGORY_GROUPS, DEFAULT_CATEGORIES, type Category } from "@/lib/categories";
-import { buildBalances, currentMonth, duesObligations, monthLabel, personMonthStats, resolveRate, vaultSummary } from "@/lib/ledger";
-import { formatPaise, paiseToRupeesString, parseRupees } from "@/lib/money";
+import { buildBalances, currentMonth, duesObligations, monthLabel, resolveFixedCharges, resolveRate, vaultSummary, type FixedCharge } from "@/lib/ledger";
+import { formatPaise, paiseToRupeesString, parseRupees, splitEqual } from "@/lib/money";
 
-const TABS = ["people", "manager", "rates", "fixed", "categories", "settings"] as const;
+const TABS = ["wallet", "fixed", "manager", "rates", "categories", "settings"] as const;
 type TabId = (typeof TABS)[number];
-const TAB_LABEL: Record<TabId, string> = { people: "People & Vaults", manager: "Manager", rates: "Utility rates", fixed: "Fixed charges", categories: "Categories", settings: "Settings" };
+const TAB_LABEL: Record<TabId, string> = { wallet: "My wallet", fixed: "Rent & fixed", manager: "Manager", rates: "Utility rates", categories: "Categories", settings: "Settings" };
 
 export const Route = createFileRoute("/household")({
-  validateSearch: (s: Record<string, unknown>): { tab: TabId } => ({ tab: (TABS as readonly string[]).includes(s["tab"] as string) ? (s["tab"] as TabId) : "people" }),
+  validateSearch: (s: Record<string, unknown>): { tab: TabId } => ({ tab: (TABS as readonly string[]).includes(s["tab"] as string) ? (s["tab"] as TabId) : "wallet" }),
   head: () => ({ meta: [{ title: "Household — Room Ledger" }] }),
   component: HouseholdPage,
 });
@@ -36,13 +38,13 @@ function HouseholdPage() {
   if (loading) return <LoadingBlock />;
   return (
     <div>
-      <PageHeader title="Household" subtitle="People, vaults and settings" />
+      <PageHeader title="Household" subtitle="Your wallet, rent and settings" />
       <Tabs value={tab} onValueChange={(v) => void navigate({ to: "/household", search: { tab: v as TabId } })}>
-        <TabsList className="mb-4 flex h-12 w-full justify-start gap-1 overflow-x-auto">
+        <TabsList className="mb-4 flex h-12 w-full justify-start gap-1 overflow-x-auto [scrollbar-width:none]">
           {TABS.map((t) => <TabsTrigger key={t} value={t} className="h-10 shrink-0">{TAB_LABEL[t]}</TabsTrigger>)}
         </TabsList>
       </Tabs>
-      {tab === "people" ? <PeopleTab /> : tab === "manager" ? <ManagerTab /> : tab === "rates" ? <RatesTab /> : tab === "fixed" ? <FixedTab /> : tab === "categories" ? <CategoriesTab /> : <SettingsTab />}
+      {tab === "wallet" ? <WalletTab /> : tab === "manager" ? <ManagerTab /> : tab === "rates" ? <RatesTab /> : tab === "fixed" ? <FixedTab /> : tab === "categories" ? <CategoriesTab /> : <SettingsTab />}
     </div>
   );
 }
@@ -50,58 +52,64 @@ function HouseholdPage() {
 const AdminNote = () => <p className="mb-3 rounded-xl bg-muted p-3 text-xs text-muted-foreground">Only household admins can change this. You're viewing it read-only.</p>;
 const run = async (fn: () => Promise<unknown>, ok: string) => { try { await fn(); toast.success(ok); return true; } catch (e) { toast.error((e as Error).message || "Couldn't save."); return false; } };
 
-// ───────── People & Personal Vaults ─────────
-function PeopleTab() {
-  const { roommates, month, allocations, wallet, expenses, monthDoc, settings, isAdmin, me } = useLedger();
-  const [editing, setEditing] = useState<string | null>(null);
+// ───────── My wallet (private: nobody else can see or change it) ─────────
+function WalletTab() {
+  const { month, allocations, wallet, settings, me } = useLedger();
+  const [editing, setEditing] = useState(false);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
-  const stats = personMonthStats(roommates.map((r) => r.id), expenses, monthDoc?.fixed ?? null);
+  if (!me) return null;
+  const v = vaultSummary(me.id, month, allocations, wallet, settings.carryForward);
+  const entries = wallet.filter((w) => w.roommateId === me.id && w.month === month).sort((a, b) => b.date.localeCompare(a.date) || a.label.localeCompare(b.label));
+  const months = [...new Set([...allocations.map((a) => a.month), ...wallet.map((w) => w.month), month])].sort().reverse().slice(0, 6);
+  const parsed = evalAmount(text);
 
   return (
-    <div className="grid gap-4 md:grid-cols-2">
-      {roommates.map((r) => {
-        const v = vaultSummary(r.id, month, allocations, wallet, settings.carryForward);
-        const st = stats[r.id];
-        const entries = wallet.filter((w) => w.roommateId === r.id && w.month === month).sort((a, b) => b.date.localeCompare(a.date));
-        const months = [...new Set([...allocations.filter((a) => a.roommateId === r.id).map((a) => a.month), ...wallet.filter((w) => w.roommateId === r.id).map((w) => w.month), month])].sort().reverse().slice(0, 6);
-        const parsed = parseRupees(text);
-        return (
-          <article key={r.id} className="panel p-4">
-            <div className="flex items-center gap-3">
-              <Avatar name={r.name} className="size-11" />
-              <div className="flex-1"><p className="font-bold">{r.name}{r.id === me?.id ? <span className="ml-1.5 text-xs font-medium text-muted-foreground">(you)</span> : null}</p><p className="text-xs text-muted-foreground">{r.role === "admin" ? "Admin" : "Member"}{r.upiId ? ` · ${r.upiId}` : ""}</p></div>
-              {v.status === "over" ? <StatusBadge tone="danger">Over by {formatPaise(-v.remaining)}</StatusBadge> : v.status === "low" ? <StatusBadge tone="warn">Low balance</StatusBadge> : v.status === "unset" ? <StatusBadge tone="muted">No allocation</StatusBadge> : <StatusBadge tone="ok">On track</StatusBadge>}
-            </div>
-            <div className="mt-4">
-              <p className="text-xs text-muted-foreground">Vault remaining</p>
-              <Money paise={v.remaining} className={cx("text-3xl font-extrabold", v.remaining < 0 && "text-destructive")} />
-              <div className="mt-2"><ProgressBar value={v.utilisation === Infinity ? 1 : v.utilisation} tone={v.status} /></div>
-              <p className="num mt-1.5 text-xs text-muted-foreground">{formatPaise(v.spent)} spent of {formatPaise(v.allocation)} allocation{v.carry ? ` + ${formatPaise(v.carry)} carried` : ""}{v.inherited && v.allocation ? " (inherited)" : ""}</p>
-            </div>
-            <dl className="num mt-3 grid grid-cols-2 gap-1.5 text-center text-[11px] min-[400px]:grid-cols-4">
-              {([["Shared", v.byType.shared], ["Utilities", v.byType.utility], ["Fixed", v.byType.fixed], ["Personal", v.byType.personal]] as const).map(([k, n]) => <div key={k} className="rounded-lg bg-muted p-2"><dt className="text-muted-foreground">{k}</dt><dd className="mt-0.5 text-xs font-bold">{formatPaise(n)}</dd></div>)}
-            </dl>
-            <p className="num mt-2 text-xs text-muted-foreground">Fronted for the group: {formatPaise(st?.paid ?? 0)} (settled through Settle Up, not counted against the vault).</p>
+    <div className="space-y-4">
+      <p className="flex items-start gap-2 rounded-xl bg-accent p-3 text-xs text-accent-foreground"><Lock className="mt-0.5 size-4 shrink-0" aria-hidden />This wallet is yours alone. Your roommates can't see its balance, spending or daily limit, and only you can change it.</p>
 
-            {isAdmin ? (editing === r.id ? (
-              <div className="mt-3 flex gap-2">
-                <Input aria-label={`${r.name} allocation`} inputMode="decimal" className="num h-11" value={text} onChange={(e) => setText(e.target.value)} placeholder="₹ for this month" aria-invalid={text !== "" && parsed === null} />
-                <Button className="h-11" disabled={busy || parsed === null} onClick={async () => { setBusy(true); const ok = await run(() => setAllocation(month, r.id, parsed!, v.allocation, me!.id), "Allocation saved"); setBusy(false); if (ok) setEditing(null); }}>Save</Button>
-                <Button variant="ghost" className="h-11" onClick={() => setEditing(null)}>Cancel</Button>
-              </div>
-            ) : <Button variant="outline" className="mt-3 h-11" onClick={() => { setEditing(r.id); setText(paiseToRupeesString(v.allocation)); }}><Pencil className="mr-2 size-4" />Edit {monthLabel(month)} allocation</Button>) : null}
+      <article className="panel p-4">
+        <div className="flex items-center gap-3">
+          <Avatar name={me.name} className="size-11" />
+          <div className="flex-1"><p className="font-bold">{me.name}</p><p className="text-xs text-muted-foreground">{monthLabel(month)}</p></div>
+          {v.status === "over" ? <StatusBadge tone="danger">Over by {formatPaise(-v.remaining)}</StatusBadge> : v.status === "low" ? <StatusBadge tone="warn">Low balance</StatusBadge> : v.status === "unset" ? <StatusBadge tone="muted">Not set</StatusBadge> : <StatusBadge tone="ok">On track</StatusBadge>}
+        </div>
+        <div className="mt-4">
+          <p className="text-xs text-muted-foreground">Wallet remaining</p>
+          <Money paise={v.remaining} className={cx("text-3xl font-extrabold", v.remaining < 0 && "text-destructive")} />
+          <div className="mt-2"><ProgressBar value={v.utilisation === Infinity ? 1 : v.utilisation} tone={v.status} /></div>
+          <p className="num mt-1.5 text-xs text-muted-foreground">{formatPaise(v.spent)} spent of {formatPaise(v.allocation)}{v.carry ? ` + ${formatPaise(v.carry)} carried` : ""}{v.inherited && v.allocation ? " (same as last month)" : ""}</p>
+        </div>
 
-            <details className="mt-3"><summary className="cursor-pointer py-2 text-sm font-semibold text-primary">Vault ledger · {monthLabel(month)} ({entries.length})</summary>
-              {entries.length === 0 ? <p className="py-2 text-xs text-muted-foreground">No spending recorded.</p> : <ul className="divide-y divide-border text-sm">{entries.map((e) => <li key={e.id} className="flex items-center justify-between gap-2 py-2"><span className="min-w-0"><span className="block truncate font-medium">{e.label}</span><span className="num text-xs text-muted-foreground">{e.date} · {e.type}</span></span><Money paise={-e.amountPaise} className="font-semibold" /></li>)}</ul>}
-            </details>
-            <details><summary className="cursor-pointer py-2 text-sm font-semibold text-primary">Monthly history</summary>
-              <ul className="divide-y divide-border text-xs">{months.map((m) => { const h = vaultSummary(r.id, m, allocations, wallet, settings.carryForward); return <li key={m} className="num grid grid-cols-[4.5rem_1fr_1fr_1fr] gap-1 py-2"><span className="font-medium">{m}</span><span>{formatPaise(h.allocation)}</span><span>{formatPaise(h.spent)}</span><span className={cx("text-right font-semibold", h.remaining < 0 && "text-destructive")}>{formatPaise(h.remaining)}</span></li>; })}</ul>
-              <p className="num grid grid-cols-[4.5rem_1fr_1fr_1fr] gap-1 pb-1 text-[11px] text-muted-foreground"><span>Month</span><span>Allocated</span><span>Spent</span><span className="text-right">Left</span></p>
-            </details>
-          </article>
-        );
-      })}
+        {editing ? (
+          <div className="mt-3 space-y-2">
+            <Label htmlFor="alloc">My wallet for {monthLabel(month)} (₹)</Label>
+            <AmountInput id="alloc" value={text} onChange={setText} invalid={text !== "" && parsed === null} placeholder="e.g. 15000 or 10000+5000" />
+            <div className="flex gap-2">
+              <Button className="h-11 flex-1" disabled={busy || parsed === null} onClick={async () => { setBusy(true); const ok = await run(() => setAllocation(month, me.id, parsed!, v.allocation, me.id), "Wallet saved"); setBusy(false); if (ok) setEditing(false); }}>Save</Button>
+              <Button variant="ghost" className="h-11" onClick={() => setEditing(false)}>Cancel</Button>
+            </div>
+            <p className="text-xs text-muted-foreground">Later months keep this amount until you change it.</p>
+          </div>
+        ) : <Button variant="outline" className="mt-3 h-11 w-full" onClick={() => { setEditing(true); setText(v.allocation ? paiseToRupeesString(v.allocation) : ""); }}><Pencil className="mr-2 size-4" />{v.allocation ? "Edit my wallet amount" : "Set my wallet amount"}</Button>}
+      </article>
+
+      <DailyLimitCard />
+
+      <dl className="num grid grid-cols-2 gap-2 text-center text-[11px] min-[400px]:grid-cols-4">
+        {([["Shared", v.byType.shared], ["Utilities", v.byType.utility], ["Rent & fixed", v.byType.fixed], ["Personal", v.byType.personal]] as const).map(([k, n]) => <div key={k} className="tile p-2.5"><dt className="text-muted-foreground">{k}</dt><dd className="mt-0.5 text-sm font-bold">{formatPaise(n)}</dd></div>)}
+      </dl>
+
+      <section className="panel p-4">
+        <h2 className="mb-1 font-bold">Wallet ledger · {entries.length}</h2>
+        <p className="mb-1 text-xs text-muted-foreground">Newest first. Money you front for the group is settled in Settle Up, not counted here.</p>
+        {entries.length === 0 ? <p className="py-2 text-sm text-muted-foreground">No spending recorded yet.</p> : <ul className="divide-y divide-border text-sm">{entries.map((e) => <li key={e.id} className="flex min-h-12 items-center justify-between gap-2 py-2"><span className="min-w-0"><span className="block truncate font-medium">{e.label}</span><span className="num text-xs text-muted-foreground">{fmtDate(e.date)} · {e.type === "fixed" ? "rent & fixed" : e.type}</span></span><Money paise={-e.amountPaise} className="font-semibold" /></li>)}</ul>}
+      </section>
+
+      <details className="panel p-4"><summary className="cursor-pointer text-sm font-semibold text-primary">Monthly history</summary>
+        <p className="num mt-2 grid grid-cols-[4.5rem_1fr_1fr_1fr] gap-1 text-[11px] text-muted-foreground"><span>Month</span><span>Wallet</span><span>Spent</span><span className="text-right">Left</span></p>
+        <ul className="divide-y divide-border text-xs">{months.map((m) => { const h = vaultSummary(me.id, m, allocations, wallet, settings.carryForward); return <li key={m} className="num grid grid-cols-[4.5rem_1fr_1fr_1fr] gap-1 py-2"><span className="font-medium">{m}</span><span>{formatPaise(h.allocation)}</span><span>{formatPaise(h.spent)}</span><span className={cx("text-right font-semibold", h.remaining < 0 && "text-destructive")}>{formatPaise(h.remaining)}</span></li>; })}</ul>
+      </details>
     </div>
   );
 }
@@ -161,28 +169,76 @@ function RatesTab() {
   );
 }
 
-// ───────── Fixed charges ─────────
+// ───────── Fixed charges (editable) ─────────
+const fmtDate = (d: string) => `${d.slice(8, 10)} ${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][Number(d.slice(5, 7)) - 1] ?? ""}`;
+const totalOf = (c: FixedCharge, n: number) => (c.allocation === "custom" && Object.keys(c.customShares).length ? Object.values(c.customShares).reduce((a, b) => a + b, 0) : c.amountPaise * n);
+
 function FixedTab() {
-  const { month, monthDoc, roommates, nameOf } = useLedger();
+  const { month, monthDoc, roommates, nameOf, fixedVersions, isAdmin } = useLedger();
+  const [editor, setEditor] = useState<{ charge?: FixedCharge } | null>(null);
   const manager = monthDoc?.managerId ? nameOf(monthDoc.managerId) : "the manager";
+  const n = roommates.length;
+  const charges = resolveFixedCharges(fixedVersions, month);
+  const roomTotal = charges.reduce((s, c) => s + totalOf(c, n), 0);
+  const history = fixedVersions.filter((v) => v.createdAtMs > 0).sort((a, b) => b.createdAtMs - a.createdAtMs).slice(0, 8);
   return (
     <div className="space-y-4">
       <section className="panel p-4">
-        <div className="mb-3 flex items-center justify-between"><h2 className="font-bold">Fixed monthly charges · {monthLabel(month)}</h2><StatusBadge tone="muted">Fixed</StatusBadge></div>
-        <div className="overflow-x-auto">
-          <table className="num w-full text-sm">
-            <thead><tr className="text-left text-xs text-muted-foreground"><th className="py-2 font-medium">Charge</th><th className="py-2 text-right font-medium">Room total</th><th className="py-2 text-right font-medium">Each of {roommates.length}</th></tr></thead>
-            <tbody className="divide-y divide-border">
-              {FIXED_CHARGES.map((c) => (
-                <tr key={c.key}><td className="py-2.5 font-semibold">{c.name}</td><td className="py-2.5 text-right"><Money paise={c.totalPaise} /></td><td className="py-2.5 text-right font-bold"><Money paise={eachPaise(c.totalPaise)} /></td></tr>
-              ))}
-            </tbody>
-            <tfoot><tr className="border-t border-border font-extrabold"><td className="py-2.5">Total</td><td className="py-2.5 text-right"><Money paise={FIXED_TOTAL_PAISE} /></td><td className="py-2.5 text-right text-primary"><Money paise={FIXED_EACH_PAISE} /></td></tr></tfoot>
-          </table>
-        </div>
-        <p className="mt-3 text-xs text-muted-foreground">Every roommate pays {formatPaise(FIXED_EACH_PAISE)} each month, collected by {manager}. These amounts are built into the app, so they can't drift or be edited in the database; record payments in Settle Up.</p>
+        <div className="mb-3 flex items-center justify-between gap-2"><h2 className="font-bold">Rent & fixed charges · {monthLabel(month)}</h2>{isAdmin ? <Button className="h-10" onClick={() => setEditor({})}><Plus className="mr-1.5 size-4" />Add</Button> : null}</div>
+        {!isAdmin ? <AdminNote /> : null}
+        {charges.length === 0 ? <p className="py-3 text-sm text-muted-foreground">No fixed charges for this month.</p> : (
+          <ul className="divide-y divide-border">
+            {charges.map((c) => (
+              <li key={c.key} className="flex min-h-14 items-center gap-3 py-2">
+                <div className="min-w-0 flex-1"><p className="font-semibold">{c.name}</p><p className="num text-xs text-muted-foreground">Room total <Money paise={totalOf(c, n)} /> · each of {n} pays <Money paise={Math.floor(totalOf(c, n) / Math.max(1, n))} />{c.allocation === "custom" ? "+" : ""}</p></div>
+                {isAdmin ? <Button variant="outline" className="h-11" onClick={() => setEditor({ charge: c })}><Pencil className="mr-1.5 size-4" />Edit</Button> : null}
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="num mt-3 flex items-center justify-between rounded-xl bg-muted p-3 text-sm font-extrabold"><span>Total per month</span><span className="text-primary"><Money paise={roomTotal} /> <span className="text-xs font-medium text-muted-foreground">room</span></span></div>
+        <p className="mt-3 text-xs text-muted-foreground">Each roommate's share is collected by {manager}; record payments in Settle Up. A change applies from the month you pick onward — months before it keep their saved amounts.</p>
       </section>
+      {history.length ? (
+        <section className="panel p-4"><h2 className="mb-1 font-bold">Recent changes</h2>
+          <ul className="divide-y divide-border text-sm">{history.map((h) => <li key={h.id} className="flex justify-between gap-3 py-2"><span>{h.name} · from {h.effectiveMonth}{h.active ? "" : " · stopped"}</span><Money paise={h.active ? totalOf(h, n) : 0} className="font-semibold" /></li>)}</ul>
+        </section>
+      ) : null}
+      {editor ? <FixedEditor {...(editor.charge ? { charge: editor.charge } : {})} onClose={() => setEditor(null)} /> : null}
     </div>
+  );
+}
+
+function FixedEditor({ charge, onClose }: { charge?: FixedCharge; onClose: () => void }) {
+  const { month, roommates, fixedVersions, me } = useLedger();
+  const n = roommates.length;
+  const [name, setName] = useState(charge?.name ?? "");
+  const [total, setTotal] = useState(charge ? paiseToRupeesString(totalOf(charge, n)) : "");
+  const [eff, setEff] = useState(month);
+  const [stop, setStop] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const paise = evalAmount(total);
+  const each = paise !== null && n ? splitEqual(paise, roommates.map((r) => r.id)) : null;
+  const eachText = each ? (Math.max(...Object.values(each)) === Math.min(...Object.values(each)) ? formatPaise(Object.values(each)[0] ?? 0) : `${formatPaise(Math.min(...Object.values(each)))} – ${formatPaise(Math.max(...Object.values(each)))}`) : "—";
+  const valid = name.trim() !== "" && (stop || (paise !== null && paise > 0));
+  return (
+    <ResponsiveSheet open onOpenChange={(o) => !o && !busy && onClose()} title={charge ? `Edit ${charge.name}` : "Add a fixed charge"} description="Split equally between all roommates every month">
+      <div className="space-y-4">
+        <div><Label htmlFor="fc-name">Name</Label><Input id="fc-name" className="mt-1.5 h-11" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Room rent, WiFi" /></div>
+        <div>
+          <Label htmlFor="fc-total">Room total per month (₹)</Label>
+          <AmountInput id="fc-total" className="mt-1.5" value={total} onChange={setTotal} invalid={total !== "" && paise === null} />
+          <p className="num mt-1 text-sm text-muted-foreground">Each of {n} pays <strong className="text-foreground">{eachText}</strong></p>
+        </div>
+        <div><Label>Applies from</Label><MonthField value={eff} onChange={setEff} /><p className="mt-1.5 text-xs text-muted-foreground">Months before this stay exactly as they were.</p></div>
+        {charge ? <div className="flex items-center justify-between gap-3 rounded-xl border border-border p-3"><div><Label htmlFor="fc-stop">Stop this charge from {eff}</Label><p className="text-xs text-muted-foreground">Nobody is charged from that month on.</p></div><Switch id="fc-stop" checked={stop} onCheckedChange={setStop} /></div> : null}
+        <Button className="bg-grad-primary h-12 w-full text-white" disabled={busy || !valid || !me} onClick={async () => {
+          setBusy(true);
+          const ok = await run(() => saveFixedCharge({ ...(charge ? { key: charge.key } : {}), name, totalPaise: stop ? (charge ? totalOf(charge, n) : 0) : paise!, effectiveMonth: eff, active: !stop }, roommates, fixedVersions, currentMonth(), me!.id), stop ? "Charge stopped" : "Fixed charge saved");
+          setBusy(false); if (ok) onClose();
+        }}>{busy ? "Saving…" : "Save"}</Button>
+      </div>
+    </ResponsiveSheet>
   );
 }
 
@@ -251,7 +307,7 @@ function SettingsTab(): ReactNode {
   return (
     <div className="space-y-4">
       <section className="panel space-y-4 p-4">
-        <h2 className="font-bold">Personal Vault</h2>
+        <h2 className="font-bold">Wallet</h2>
         <div className="flex items-center justify-between gap-4"><div><Label htmlFor="carry">Carry unused balance into next month</Label><p className="text-xs text-muted-foreground">Off by default. When on, leftover (or overspent) vault balance rolls forward. Balances are always recomputed from the ledger, so toggling is reversible.</p></div><Switch id="carry" checked={settings.carryForward} disabled={!isAdmin} onCheckedChange={(v) => void run(() => saveSettings({ carryForward: v }, me!.id), "Setting saved")} /></div>
         {!isAdmin ? <AdminNote /> : null}
       </section>

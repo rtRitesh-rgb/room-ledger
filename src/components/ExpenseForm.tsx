@@ -10,11 +10,13 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Avatar, Money, ResponsiveSheet, cx } from "./kit";
 import { CategoryPicker } from "./CategoryPicker";
+import { AmountInput } from "./AmountInput";
+import { evalAmount, resolveAmountText } from "@/lib/calc";
 import { useLedger } from "@/lib/data";
 import { deleteExpense, saveExpense } from "@/lib/db";
 import { uploadReceipt } from "@/lib/receipts";
-import { computeSplit, parseRupees, type SplitMode } from "@/lib/money";
-import { currentMonth, type Expense } from "@/lib/ledger";
+import { computeSplit, type SplitMode } from "@/lib/money";
+import { currentMonth, todayISO, type Expense } from "@/lib/ledger";
 
 const MODES: { id: SplitMode; label: string; hint: string }[] = [
   { id: "equal", label: "Equal", hint: "Split evenly between the people you tick." },
@@ -23,7 +25,7 @@ const MODES: { id: SplitMode; label: string; hint: string }[] = [
   { id: "personal", label: "Personal", hint: "Only for the payer. Doesn't create any debt." },
 ];
 
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => todayISO();
 
 export function ExpenseForm({ expense, onClose }: { expense?: Expense; onClose: () => void }) {
   const { roommates, me, categories, month, nameOf } = useLedger();
@@ -49,12 +51,13 @@ export function ExpenseForm({ expense, onClose }: { expense?: Expense; onClose: 
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  const total = parseRupees(amountText);
-  const split = computeSplit({ mode, total: total ?? 0, order, payerId, included, raw });
+  const total = evalAmount(amountText); // accepts sums like 12+13.5+16
+  const rawResolved = useMemo(() => (mode === "custom" ? Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, resolveAmountText(v)])) : raw), [mode, raw]);
+  const split = computeSplit({ mode, total: total ?? 0, order, payerId, included, raw: rawResolved });
 
   const fieldErrors = {
     name: name.trim() ? "" : "Give this expense a name.",
-    amount: amountText.trim() === "" ? "Enter the amount." : total === null ? "Enter a valid amount (up to 2 decimals)." : total <= 0 ? "Amount must be greater than zero." : "",
+    amount: amountText.trim() === "" ? "Enter the amount." : total === null ? "Enter an amount or a sum like 12+13.5+16." : total <= 0 ? "Amount must be greater than zero." : "",
     category: categoryId ? "" : "Choose a category.",
     date: /^\d{4}-\d{2}-\d{2}$/.test(date) ? "" : "Pick a date.",
   };
@@ -113,8 +116,8 @@ export function ExpenseForm({ expense, onClose }: { expense?: Expense; onClose: 
 
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
-            <Label htmlFor="exp-amount">Amount (₹)</Label>
-            <Input id="exp-amount" inputMode="decimal" className="num mt-1.5 h-11 text-lg font-semibold" value={amountText} onChange={(e) => setAmountText(e.target.value)} placeholder="0.00" aria-invalid={!!show("amount")} />
+            <Label htmlFor="exp-amount">Amount (₹) <span className="text-xs font-normal text-muted-foreground">· tap 🖩 to add parts</span></Label>
+            <AmountInput id="exp-amount" className="mt-1.5" value={amountText} onChange={setAmountText} invalid={!!show("amount")} />
             {err(show("amount"))}
           </div>
           <div>
@@ -170,7 +173,7 @@ export function ExpenseForm({ expense, onClose }: { expense?: Expense; onClose: 
                       <Money paise={share ?? 0} className={cx("text-sm font-semibold", !share && "text-muted-foreground")} />
                     ) : (
                       <div className="w-32">
-                        <Input id={`raw-${r.id}`} inputMode="decimal" className="num h-10 text-right" placeholder={mode === "percent" ? "0 %" : "₹ 0"} value={raw[r.id] ?? ""}
+                        <Input id={`raw-${r.id}`} inputMode={mode === "custom" ? "text" : "decimal"} className="num h-10 text-right" placeholder={mode === "percent" ? "0 %" : "₹ 0 or 5+7"} value={raw[r.id] ?? ""}
                           onChange={(e) => setRaw((cur) => ({ ...cur, [r.id]: e.target.value }))} aria-invalid={!!split.errors[r.id]} aria-describedby={`raw-err-${r.id}`} />
                         {mode === "percent" && share ? <p className="num mt-0.5 text-right text-xs text-muted-foreground"><Money paise={share} /></p> : null}
                       </div>

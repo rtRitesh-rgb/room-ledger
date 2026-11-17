@@ -8,21 +8,23 @@ import { Avatar, Money, NativeSelect, ProgressBar, ResponsiveSheet } from "./kit
 import { useLedger } from "@/lib/data";
 import { recordPayment } from "@/lib/db";
 import { uuid } from "@/lib/uuid";
-import { formatPaise, paiseToRupeesString, parseRupees } from "@/lib/money";
-import { validatePayment, type Balance } from "@/lib/ledger";
+import { formatPaise, paiseToRupeesString } from "@/lib/money";
+import { evalAmount } from "@/lib/calc";
+import { AmountInput } from "./AmountInput";
+import { todayISO, validatePayment, type Balance } from "@/lib/ledger";
 
 export function PaymentDialog({ balance, onClose }: { balance: Balance; onClose: () => void }) {
   const { month, nameOf, me, roommates } = useLedger();
   const requestId = useRef(uuid()).current; // same id on every retry → can't double-record
   const [amountText, setAmountText] = useState(paiseToRupeesString(balance.remainingPaise));
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(todayISO());
   const [method, setMethod] = useState("UPI");
   const [reference, setReference] = useState("");
   const [note, setNote] = useState("");
   const [step, setStep] = useState<"form" | "confirm">("form");
   const [busy, setBusy] = useState(false);
 
-  const amount = parseRupees(amountText);
+  const amount = evalAmount(amountText);
   const error = validatePayment(amount, balance.remainingPaise);
   const upi = roommates.find((r) => r.id === balance.toId)?.upiId;
 
@@ -65,7 +67,7 @@ export function PaymentDialog({ balance, onClose }: { balance: Balance; onClose:
           <>
             <div>
               <Label htmlFor="pay-amt">Amount (₹)</Label>
-              <Input id="pay-amt" inputMode="decimal" className="num mt-1.5 h-12 text-xl font-bold" value={amountText} onChange={(e) => setAmountText(e.target.value)} aria-invalid={!!error} aria-describedby="pay-err" />
+              <AmountInput id="pay-amt" className="mt-1.5" value={amountText} onChange={setAmountText} invalid={!!error} />
               <div className="mt-2 flex flex-wrap gap-2">
                 {quick.map((q) => (
                   <Button key={q.label} type="button" variant="outline" size="sm" className="h-10" onClick={() => setAmountText(paiseToRupeesString(q.value))}>{q.label} · {formatPaise(q.value)}</Button>

@@ -8,7 +8,7 @@ import {
   type Expense, type FixedCharge, type FixedSnapshotItem, type MonthDoc, type Payment, type Roommate, type Settings,
   type UtilityBill, type UtilityKind, type WalletEntry,
 } from "./ledger";
-import type { Paise, SplitMode } from "./money";
+import { splitEqual, type Paise, type SplitMode } from "./money";
 import type { Category } from "./categories";
 
 export const C = {
@@ -70,7 +70,10 @@ export async function saveExpense(input: ExpenseInput, actorId: string, existing
     if (prev) for (const wid of walletEntryIdsForExpense(prev)) tx.delete(doc(db, C.wallet, wid));
     tx.set(ref, strip(next));
     for (const w of walletEntriesForExpense(next)) tx.set(doc(db, C.wallet, w.id), strip(w));
-    const a = audit(actorId, prev ? "update" : "create", "expense", id, `${prev ? "Edited" : "Added"} ${next.name}`, { before: prev && { amount: prev.amountPaise, shares: prev.shares }, after: { amount: next.amountPaise, shares: next.shares } });
+    // Personal expenses are private to their owner, so the (household-wide) audit trail never records their name or amount.
+    const a = next.isPersonal
+      ? audit(actorId, prev ? "update" : "create", "expense", id, `${prev ? "Edited" : "Added"} a personal expense`)
+      : audit(actorId, prev ? "update" : "create", "expense", id, `${prev ? "Edited" : "Added"} ${next.name}`, { before: prev && { amount: prev.amountPaise, shares: prev.shares }, after: { amount: next.amountPaise, shares: next.shares } });
     tx.set(a.ref, a.data);
   });
   return id;
@@ -85,7 +88,7 @@ export async function deleteExpense(e: Expense, actorId: string) {
     const cur = fromDoc<Expense>(snap);
     for (const wid of walletEntryIdsForExpense(cur)) tx.delete(doc(db, C.wallet, wid));
     tx.delete(ref);
-    const a = audit(actorId, "delete", "expense", e.id, `Deleted ${cur.name}`, { amount: cur.amountPaise, shares: cur.shares });
+    const a = cur.isPersonal ? audit(actorId, "delete", "expense", e.id, "Deleted a personal expense") : audit(actorId, "delete", "expense", e.id, `Deleted ${cur.name}`, { amount: cur.amountPaise, shares: cur.shares });
     tx.set(a.ref, a.data);
   });
 }
@@ -183,10 +186,11 @@ export async function ensureMonth(month: string, roommates: Roommate[], versions
 }
 
 /** Admin action: replace this month's fixed-charge snapshot with the currently effective charges. */
-export async function resnapshotMonth(month: string, roommates: Roommate[], versions: readonly FixedCharge[], actorId: string, staleWalletIds: string[] = []) {
+export async function resnapshotMonth(month: string, roommates: Roommate[], versions: readonly FixedCharge[], actorId: string, staleWalletIds: string[] = [], onlyIfExists = false) {
   await runTransaction(db, async (tx) => {
     const ref = doc(db, C.months, month);
     const snap = await tx.get(ref);
+    if (onlyIfExists && !(snap.data() as Partial<MonthDoc> | undefined)?.fixed) return;
     const old = ((snap.data() as Partial<MonthDoc> | undefined)?.fixed ?? []) as FixedSnapshotItem[];
     for (const w of walletEntriesForFixed(month, old)) tx.delete(doc(db, C.wallet, w.id));
     for (const id of staleWalletIds) tx.delete(doc(db, C.wallet, id));
@@ -217,11 +221,13 @@ export async function addRate(r: { kind: UtilityKind; ratePaise: Paise; effectiv
 
 // ───────────── Vault, categories, settings, profile ─────────────
 
+/** A wallet allocation can only be written by its owner (enforced in firestore.rules). */
 export async function setAllocation(month: string, roommateId: string, amountPaise: Paise, previous: Paise, actorId: string) {
   const batch = writeBatch(db);
   const id = `${month}_${roommateId}`;
   batch.set(doc(db, C.allocations, id), { month, roommateId, amountPaise, updatedAtMs: now() });
-  const a = audit(actorId, "upsert", "allocation", id, `Vault allocation ₹${previous / 100} → ₹${amountPaise / 100}`, { previous, amountPaise });
+  void previous; // wallet amounts are private: the audit trail only notes that it changed
+  const a = audit(actorId, "upsert", "allocation", id, "Wallet allocation updated");
   batch.set(a.ref, a.data);
   await batch.commit();
 }
@@ -252,3 +258,57 @@ export async function claimRoommate(uid: string, roommateId: string) {
 }
 
 export type { WalletEntry };
+
+// ───────────── Editable fixed charges (rent, cleaning, water, …) ─────────────
+
+export type FixedChargeInput = {
+  /** Existing key to edit, or omitted to add a new charge. */
+  key?: string;
+  name: string;
+  /** Whole-room total; each roommate pays an equal share (paise remainders go to the first people). */
+  totalPaise: Paise;
+  /** First month the new amount applies to. Earlier months keep their saved amounts. */
+  effectiveMonth: string;
+  active: boolean;
+};
+
+const slugKey = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "charge";
+
+export function buildFixedVersion(input: FixedChargeInput, roommateIds: string[]): FixedCharge {
+  const key = input.key ?? `${slugKey(input.name)}-${Date.now().toString(36)}`;
+  const n = Math.max(1, roommateIds.length);
+  const even = input.totalPaise % n === 0;
+  return {
+    id: `${key}_${input.effectiveMonth}`, key, name: input.name.trim(), amountPaise: Math.floor(input.totalPaise / n), frequency: "monthly",
+    active: input.active, effectiveMonth: input.effectiveMonth, allocation: even ? "each" : "custom",
+    customShares: even ? {} : splitEqual(input.totalPaise, roommateIds), note: "Per person", createdAtMs: now(),
+  };
+}
+
+/**
+ * Saves a new version of a fixed charge and re-applies it to every already-created month from `effectiveMonth` up to the current month.
+ * Older months are untouched, so history never changes. `versions` = all versions known now (defaults + saved).
+ */
+export async function saveFixedCharge(input: FixedChargeInput, roommates: Roommate[], versions: readonly FixedCharge[], currentMonthStr: string, actorId: string) {
+  const version = buildFixedVersion(input, roommates.map((r) => r.id));
+  const batch = writeBatch(db);
+  batch.set(doc(db, C.fixed, version.id), strip(version));
+  const a = audit(actorId, "upsert", "fixedCharge", version.id, `${version.name} set to ₹${input.totalPaise / 100} (room total) from ${input.effectiveMonth}${input.active ? "" : " — stopped"}`);
+  batch.set(a.ref, a.data);
+  await batch.commit();
+  const next = [...versions.filter((v) => v.id !== version.id), version];
+  for (let m = input.effectiveMonth; m <= currentMonthStr; ) {
+    await resnapshotMonth(m, roommates, next, actorId, [], true);
+    const [y = 0, mo = 1] = m.split("-").map(Number);
+    m = mo === 12 ? `${y + 1}-01` : `${y}-${String(mo + 1).padStart(2, "0")}`;
+  }
+  return version;
+}
+
+/** Keeps only the signed-in person's fixed-charge wallet entries in line with the month's snapshot. */
+export async function syncMyFixedWallet(want: WalletEntry[], staleIds: string[]) {
+  const batch = writeBatch(db);
+  for (const id of staleIds) batch.delete(doc(db, C.wallet, id));
+  for (const w of want) batch.set(doc(db, C.wallet, w.id), strip(w));
+  await batch.commit();
+}

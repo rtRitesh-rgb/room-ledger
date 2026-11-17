@@ -20,7 +20,7 @@ const NAV = [
   { to: "/", label: "Home", icon: Home },
   { to: "/expenses", label: "Expenses", icon: Receipt },
   { to: "/settlement", label: "Settle Up", icon: HandCoins },
-  { to: "/household", label: "Household", icon: Users },
+  { to: "/household", label: "Wallet", icon: Users },
 ] as const;
 
 export function ThemeToggle({ full }: { full?: boolean }) {
@@ -134,6 +134,14 @@ function ClaimScreen() {
   );
 }
 
+function MobileTab({ n }: { n: (typeof NAV)[number] }) {
+  return (
+    <Link to={n.to} activeOptions={{ exact: n.to === "/" }} className="press flex min-h-16 flex-col items-center justify-center gap-1 text-[11px] font-semibold text-muted-foreground" activeProps={{ className: "!text-primary" }}>
+      <n.icon className="size-5" aria-hidden />{n.label}
+    </Link>
+  );
+}
+
 function AppFrame({ children }: { children: ReactNode }) {
   const { me, error } = useLedger();
   const { signOut } = useSession();
@@ -163,20 +171,16 @@ function AppFrame({ children }: { children: ReactNode }) {
         <div className="flex items-center gap-2"><InstallAppButton /><ThemeToggle /></div>
       </header>
 
-      <main className="mx-auto w-full max-w-5xl px-4 pb-32 pt-5 md:px-8 md:pb-10 md:pt-8">
+      <main className="mx-auto w-full max-w-5xl px-4 pb-28 pt-4 md:px-8 md:pb-10 md:pt-8">
         {error ? <ErrorBlock message={`Couldn't load data: ${error}`} /> : children}
       </main>
 
-      <button type="button" onClick={addExpense} aria-label="Add expense" className="bg-grad-primary press fixed right-4 z-40 flex h-14 items-center gap-2 rounded-full px-5 font-bold text-white shadow-lift md:hidden" style={{ bottom: "calc(5rem + env(safe-area-inset-bottom))" }}>
-        <Plus className="size-5" />Add
-      </button>
-
-      <nav className="pb-safe fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t border-border bg-card/95 backdrop-blur md:hidden" aria-label="Primary">
-        {NAV.map((n) => (
-          <Link key={n.to} to={n.to} activeOptions={{ exact: n.to === "/" }} className="press flex min-h-16 flex-col items-center justify-center gap-1 text-[11px] font-semibold text-muted-foreground" activeProps={{ className: "!text-primary" }}>
-            <n.icon className="size-5" aria-hidden />{n.label}
-          </Link>
-        ))}
+      <nav className="pb-safe fixed inset-x-0 bottom-0 z-30 grid grid-cols-5 items-end border-t border-border bg-card/95 backdrop-blur md:hidden" aria-label="Primary">
+        {NAV.slice(0, 2).map((n) => <MobileTab key={n.to} n={n} />)}
+        <div className="grid place-items-center pb-1.5">
+          <button type="button" onClick={addExpense} aria-label="Add expense" className="bg-grad-primary press -mt-6 grid size-14 place-items-center rounded-full text-white shadow-lift ring-4 ring-background"><Plus className="size-7" /></button>
+        </div>
+        {NAV.slice(2).map((n) => <MobileTab key={n.to} n={n} />)}
       </nav>
     </div>
   );

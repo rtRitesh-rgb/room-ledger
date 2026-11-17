@@ -9,7 +9,7 @@ import { Avatar, EmptyState, LoadingBlock, Money, PageHeader, ProgressBar, Respo
 import { useDialogs } from "@/components/dialogs";
 import { useLedger } from "@/lib/data";
 import { reversePayment } from "@/lib/db";
-import { activePayments, buildBalances, duesObligations, expenseObligations, type Balance, type Obligation, type Payment } from "@/lib/ledger";
+import { activePayments, buildBalances, byDateDesc, dayHeading, duesObligations, expenseObligations, shortDate, type Balance, type Obligation, type Payment } from "@/lib/ledger";
 import { formatPaise } from "@/lib/money";
 
 export const Route = createFileRoute("/settlement")({
@@ -100,25 +100,32 @@ function Section({ title, hint, items, onOpen, onPay }: { title: string; hint: s
 
 function Lines({ title, tone, lines }: { title: string; tone: "owe" | "back"; lines: Obligation[] }) {
   if (lines.length === 0) return null;
+  // Everything is listed by date (newest first), grouped under a day heading, with a running day total.
+  const dated = byDateDesc(lines.filter((l) => l.kind !== "fixed"));
   const fixed = lines.filter((l) => l.kind === "fixed");
-  const rest = lines.filter((l) => l.kind !== "fixed");
-  const groups: [string, Obligation[]][] = [["Expenses", rest.filter((l) => l.kind === "expense")], ["Meter bills", rest.filter((l) => l.kind === "utility")], ["Fixed charges", fixed]];
+  const days: [string, Obligation[]][] = [];
+  for (const l of dated) { const last = days[days.length - 1]; if (last && last[0] === l.date) last[1].push(l); else days.push([l.date, [l]]); }
+  const row = (l: Obligation, i: number) => (
+    <li key={i} className="flex min-h-12 items-center justify-between gap-3 py-2">
+      <span className="min-w-0"><span className="block truncate text-sm font-medium">{l.label}</span><span className="num block truncate text-xs text-muted-foreground">{l.kind === "utility" ? "Meter bill" : l.detail}</span></span>
+      <Money paise={l.amountPaise} className="text-sm font-semibold" />
+    </li>
+  );
   return (
     <section className="rounded-xl border border-border">
       <div className="flex items-center justify-between rounded-t-xl bg-muted px-3 py-2.5"><h3 className="text-sm font-bold">{title}</h3><Money paise={sum(lines)} className={cx("font-extrabold", tone === "owe" ? "text-warning-foreground dark:text-warning" : "text-success")} /></div>
-      {groups.filter(([, g]) => g.length).map(([name, g]) => (
-        <div key={name}>
-          {groups.filter(([, x]) => x.length).length > 1 ? <p className="flex justify-between px-3 pt-2 text-xs font-semibold text-muted-foreground"><span>{name}</span><Money paise={sum(g)} /></p> : null}
-          <ul className="divide-y divide-border px-3">
-            {g.map((l, i) => (
-              <li key={i} className="flex min-h-12 items-center justify-between gap-3 py-2">
-                <span className="min-w-0"><span className="block truncate text-sm font-medium">{l.label}</span><span className="num block truncate text-xs text-muted-foreground">{l.date ? `${l.date.slice(8)}/${l.date.slice(5, 7)} · ` : ""}{l.detail}</span></span>
-                <Money paise={l.amountPaise} className="text-sm font-semibold" />
-              </li>
-            ))}
-          </ul>
+      {days.map(([date, g]) => (
+        <div key={date}>
+          <p className="num flex justify-between bg-muted/40 px-3 py-1.5 text-xs font-semibold text-muted-foreground"><span>{dayHeading(date)}{date ? ` · ${shortDate(date)}` : ""}</span><Money paise={sum(g)} /></p>
+          <ul className="divide-y divide-border px-3">{g.map(row)}</ul>
         </div>
       ))}
+      {fixed.length ? (
+        <div>
+          <p className="flex justify-between bg-muted/40 px-3 py-1.5 text-xs font-semibold text-muted-foreground"><span>Monthly fixed charges</span><Money paise={sum(fixed)} /></p>
+          <ul className="divide-y divide-border px-3">{fixed.map(row)}</ul>
+        </div>
+      ) : null}
     </section>
   );
 }
