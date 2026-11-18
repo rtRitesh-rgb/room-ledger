@@ -1,0 +1,126 @@
+diff --git a/src/components/Notifications.tsx b/src/components/Notifications.tsx
+index 79f3a03..05743e2 100644
+--- a/src/components/Notifications.tsx
++++ b/src/components/Notifications.tsx
+@@ -3,9 +3,9 @@ import { useNavigate } from "@tanstack/react-router";
+ import { Bell, BellRing, CalendarClock, CheckCheck, HandCoins, Megaphone, Receipt, Trash2, Undo2, UserCog, Wallet, X, Zap, type LucideIcon } from "lucide-react";
+ import { toast } from "sonner";
+ import { Button } from "@/components/ui/button";
++import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
+ import { ResponsiveSheet, cx } from "./kit";
+ import { useNotifications } from "@/lib/notify";
+-import { pushConfigured } from "@/lib/push";
+ import { useInstallPrompt } from "@/lib/pwa";
+ import type { AppNotification, NotifType } from "@/lib/notifications";
+ 
+@@ -80,7 +80,7 @@ function NotificationSheet({ onClose }: { onClose: () => void }) {
+         {permission === "granted" ? (
+           <div className="flex items-center gap-3 rounded-xl bg-muted p-3 text-xs text-muted-foreground">
+             <BellRing className="size-4 shrink-0 text-success" aria-hidden />
+-            <span className="flex-1">{pushState === "ok" ? "Alerts are on for this phone, even when the app is closed." : pushConfigured ? "Alerts are on while the app is open. Background push isn't active on this device yet." : "Alerts are on while the app is open."}</span>
++            <span className="flex-1">{pushState === "ok" ? "Alerts are on for this phone, even when the app is closed." : pushState === "no-key" ? "Alerts are on while the app is open. For alerts when it's closed, finish the push setup (VITE_FIREBASE_VAPID_KEY on Vercel)." : pushState === "unsupported" ? "Alerts are on while the app is open. This browser can't do background push; try installing the app (Add to Home Screen)." : pushState === "failed" ? "Alerts are on while the app is open. Background push couldn't register on this device." : "Alerts are on while the app is open."}</span>
+             <Button size="sm" variant="outline" className="h-8" onClick={async () => { const r = await sendTest(); if (r === "blocked") toast.error("Couldn't send", { description: "Publish the latest firestore.rules in Firebase, then try again." }); else if (r === "failed") toast.error("Couldn't send the test. Check your connection."); }}>Send test</Button>
+           </div>
+         ) : null}
+@@ -164,3 +164,32 @@ export function NotificationPrompt() {
+     );
+   return null;
+ }
++
++const ASKED_KEY = "room-ledger-notif-asked";
++
++/** Asks once, right after sign-in, whether to allow phone notifications (the browser's own pop-up follows the tap). */
++export function NotificationAskDialog() {
++  const { permission, enableAlerts, loaded } = useNotifications();
++  const [open, setOpen] = useState(false);
++  useEffect(() => {
++    if (!loaded || permission !== "default") return;
++    try { if (localStorage.getItem(ASKED_KEY)) return; } catch { /* storage blocked: ask anyway */ }
++    const t = setTimeout(() => setOpen(true), 1200);
++    return () => clearTimeout(t);
++  }, [loaded, permission]);
++  const done = () => { try { localStorage.setItem(ASKED_KEY, "1"); } catch { /* ignore */ } setOpen(false); };
++  return (
++    <AlertDialog open={open} onOpenChange={(o) => !o && done()}>
++      <AlertDialogContent>
++        <AlertDialogHeader>
++          <AlertDialogTitle className="flex items-center gap-2"><BellRing className="size-5 text-primary" aria-hidden />Allow notifications?</AlertDialogTitle>
++          <AlertDialogDescription>Get a notification on this phone when a roommate nudges you, pays you, or the month is about to end. Tap <b>Allow</b>, then choose Allow on the next pop-up.</AlertDialogDescription>
++        </AlertDialogHeader>
++        <AlertDialogFooter>
++          <AlertDialogCancel onClick={done}>Not now</AlertDialogCancel>
++          <AlertDialogAction onClick={async () => { done(); const r = await enableAlerts(); if (r === "granted") toast.success("Notifications are on"); else if (r === "denied") toast.error("Blocked. Allow notifications for this app in your phone's settings."); }}>Allow</AlertDialogAction>
++        </AlertDialogFooter>
++      </AlertDialogContent>
++    </AlertDialog>
++  );
++}
+diff --git a/src/components/Shell.tsx b/src/components/Shell.tsx
+index 98efddf..73abda5 100644
+--- a/src/components/Shell.tsx
++++ b/src/components/Shell.tsx
+@@ -15,7 +15,7 @@ import { SessionProvider, useSession } from "@/lib/session";
+ import { useTheme, type ThemePref } from "@/lib/theme";
+ import { useInstallPrompt } from "@/lib/pwa";
+ import { NotificationsProvider } from "@/lib/notify";
+-import { NotificationBell, NotificationPrompt } from "./Notifications";
++import { NotificationAskDialog, NotificationBell, NotificationPrompt } from "./Notifications";
+ import type { Roommate } from "@/lib/ledger";
+ 
+ const NAV = [
+@@ -176,6 +176,7 @@ function AppFrame({ children }: { children: ReactNode }) {
+ 
+       <main className="mx-auto w-full max-w-5xl px-4 pb-28 pt-4 md:px-8 md:pb-10 md:pt-8">
+         <NotificationPrompt />
++        <NotificationAskDialog />
+         {error ? <ErrorBlock message={`Couldn't load data: ${error}`} /> : children}
+       </main>
+ 
+diff --git a/src/lib/notify.tsx b/src/lib/notify.tsx
+index 1834052..d203cc8 100644
+--- a/src/lib/notify.tsx
++++ b/src/lib/notify.tsx
+@@ -45,7 +45,10 @@ const getPermission = (): Permission => (typeof window === "undefined" || !("Not
+ async function showDeviceAlert(n: AppNotification) {
+   const opts: NotificationOptions = { body: n.body, icon: "/icons/icon-192.png", badge: "/icons/favicon-32.png", tag: n.id, data: { url: n.link } };
+   try {
+-    const reg = "serviceWorker" in navigator ? await navigator.serviceWorker.getRegistration() : undefined;
++    // Phones (Android Chrome / installed apps) only allow notifications through the service worker.
++    const reg = "serviceWorker" in navigator
++      ? (await navigator.serviceWorker.getRegistration()) ?? (await Promise.race([navigator.serviceWorker.ready, new Promise<undefined>((r) => setTimeout(r, 3000))]))
++      : undefined;
+     if (reg) await reg.showNotification(n.title, opts);
+     else new Notification(n.title, opts);
+   } catch { /* some browsers refuse; the in-app bell still works */ }
+@@ -146,7 +149,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
+   useEffect(() => {
+     if (!loaded) return;
+     try { void (navigator as Navigator & { setAppBadge?: (n: number) => Promise<void> }).setAppBadge?.(unread); } catch { /* unsupported */ }
+-    if (getPermission() !== "granted" || pushState === "ok") return; // with real push the phone already shows them
++    if (getPermission() !== "granted") return; // (same tag as the background push, so the phone replaces instead of duplicating)
+     const shown = loadSet(SHOWN_KEY);
+     const fresh = items.filter((n) => !n.readAtMs && !shown.has(n.id));
+     if (!fresh.length) return;
+@@ -158,7 +161,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
+       fresh.slice(0, 3).forEach((n) => void showDeviceAlert(n));
+     }
+     firstLoad.current = false;
+-  }, [items, loaded, unread, pushState]);
++  }, [items, loaded, unread]);
+ 
+   const enableAlerts = useCallback(async (): Promise<Permission> => {
+     if (getPermission() === "unsupported") return "unsupported";
+diff --git a/vite.config.ts b/vite.config.ts
+index 9b6b939..1baff62 100644
+--- a/vite.config.ts
++++ b/vite.config.ts
+@@ -9,7 +9,8 @@ import { defineConfig } from "@lovable.dev/vite-tanstack-config";
+ export default defineConfig({
+   // Keep the Firebase Admin SDK (used only by the /api/push route) as a real node_modules dependency instead of
+   // bundling it into the server build, where its CommonJS internals break.
+-  nitro: { traceDeps: ["firebase-admin", "@google-cloud/firestore", "@google-cloud/storage", "google-gax", "@grpc/grpc-js"] },
++  // (cast: the wrapper's types only list a few nitro options, but it passes the whole object through to nitro)
++  nitro: { traceDeps: ["firebase-admin", "@google-cloud/firestore", "@google-cloud/storage", "google-gax", "@grpc/grpc-js"] } as never,
+   tanstackStart: {
+     // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
+     // nitro/vite builds from this

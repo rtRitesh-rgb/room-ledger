@@ -45,7 +45,10 @@ const getPermission = (): Permission => (typeof window === "undefined" || !("Not
 async function showDeviceAlert(n: AppNotification) {
   const opts: NotificationOptions = { body: n.body, icon: "/icons/icon-192.png", badge: "/icons/favicon-32.png", tag: n.id, data: { url: n.link } };
   try {
-    const reg = "serviceWorker" in navigator ? await navigator.serviceWorker.getRegistration() : undefined;
+    // Phones (Android Chrome / installed apps) only allow notifications through the service worker.
+    const reg = "serviceWorker" in navigator
+      ? (await navigator.serviceWorker.getRegistration()) ?? (await Promise.race([navigator.serviceWorker.ready, new Promise<undefined>((r) => setTimeout(r, 3000))]))
+      : undefined;
     if (reg) await reg.showNotification(n.title, opts);
     else new Notification(n.title, opts);
   } catch { /* some browsers refuse; the in-app bell still works */ }
@@ -146,7 +149,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!loaded) return;
     try { void (navigator as Navigator & { setAppBadge?: (n: number) => Promise<void> }).setAppBadge?.(unread); } catch { /* unsupported */ }
-    if (getPermission() !== "granted" || pushState === "ok") return; // with real push the phone already shows them
+    if (getPermission() !== "granted") return; // (same tag as the background push, so the phone replaces instead of duplicating)
     const shown = loadSet(SHOWN_KEY);
     const fresh = items.filter((n) => !n.readAtMs && !shown.has(n.id));
     if (!fresh.length) return;
@@ -158,7 +161,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       fresh.slice(0, 3).forEach((n) => void showDeviceAlert(n));
     }
     firstLoad.current = false;
-  }, [items, loaded, unread, pushState]);
+  }, [items, loaded, unread]);
 
   const enableAlerts = useCallback(async (): Promise<Permission> => {
     if (getPermission() === "unsupported") return "unsupported";

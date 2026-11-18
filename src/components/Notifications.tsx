@@ -3,9 +3,9 @@ import { useNavigate } from "@tanstack/react-router";
 import { Bell, BellRing, CalendarClock, CheckCheck, HandCoins, Megaphone, Receipt, Trash2, Undo2, UserCog, Wallet, X, Zap, type LucideIcon } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { ResponsiveSheet, cx } from "./kit";
 import { useNotifications } from "@/lib/notify";
-import { pushConfigured } from "@/lib/push";
 import { useInstallPrompt } from "@/lib/pwa";
 import type { AppNotification, NotifType } from "@/lib/notifications";
 
@@ -80,7 +80,7 @@ function NotificationSheet({ onClose }: { onClose: () => void }) {
         {permission === "granted" ? (
           <div className="flex items-center gap-3 rounded-xl bg-muted p-3 text-xs text-muted-foreground">
             <BellRing className="size-4 shrink-0 text-success" aria-hidden />
-            <span className="flex-1">{pushState === "ok" ? "Alerts are on for this phone, even when the app is closed." : pushConfigured ? "Alerts are on while the app is open. Background push isn't active on this device yet." : "Alerts are on while the app is open."}</span>
+            <span className="flex-1">{pushState === "ok" ? "Alerts are on for this phone, even when the app is closed." : pushState === "no-key" ? "Alerts are on while the app is open. For alerts when it's closed, finish the push setup (VITE_FIREBASE_VAPID_KEY on Vercel)." : pushState === "unsupported" ? "Alerts are on while the app is open. This browser can't do background push; try installing the app (Add to Home Screen)." : pushState === "failed" ? "Alerts are on while the app is open. Background push couldn't register on this device." : "Alerts are on while the app is open."}</span>
             <Button size="sm" variant="outline" className="h-8" onClick={async () => { const r = await sendTest(); if (r === "blocked") toast.error("Couldn't send", { description: "Publish the latest firestore.rules in Firebase, then try again." }); else if (r === "failed") toast.error("Couldn't send the test. Check your connection."); }}>Send test</Button>
           </div>
         ) : null}
@@ -163,4 +163,33 @@ export function NotificationPrompt() {
       </div>
     );
   return null;
+}
+
+const ASKED_KEY = "room-ledger-notif-asked";
+
+/** Asks once, right after sign-in, whether to allow phone notifications (the browser's own pop-up follows the tap). */
+export function NotificationAskDialog() {
+  const { permission, enableAlerts, loaded } = useNotifications();
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!loaded || permission !== "default") return;
+    try { if (localStorage.getItem(ASKED_KEY)) return; } catch { /* storage blocked: ask anyway */ }
+    const t = setTimeout(() => setOpen(true), 1200);
+    return () => clearTimeout(t);
+  }, [loaded, permission]);
+  const done = () => { try { localStorage.setItem(ASKED_KEY, "1"); } catch { /* ignore */ } setOpen(false); };
+  return (
+    <AlertDialog open={open} onOpenChange={(o) => !o && done()}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle className="flex items-center gap-2"><BellRing className="size-5 text-primary" aria-hidden />Allow notifications?</AlertDialogTitle>
+          <AlertDialogDescription>Get a notification on this phone when a roommate nudges you, pays you, or the month is about to end. Tap <b>Allow</b>, then choose Allow on the next pop-up.</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel onClick={done}>Not now</AlertDialogCancel>
+          <AlertDialogAction onClick={async () => { done(); const r = await enableAlerts(); if (r === "granted") toast.success("Notifications are on"); else if (r === "denied") toast.error("Blocked. Allow notifications for this app in your phone's settings."); }}>Allow</AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
 }
