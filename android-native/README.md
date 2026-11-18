@@ -1,53 +1,45 @@
-# Android side (personal APK, no Play Store, all free)
+# Android notifications
 
-Everything here is free: FCM has no limits and works on Firebase's free Spark plan.
+The Android app in this project is the Capacitor project in `android/`. Its package name is
+`com.roomledger.app`. The Kotlin files in this folder are examples for a plain WebView wrapper;
+do not copy them into the Capacitor app.
 
-## 1. Firebase
-Firebase console → your project → **Add app → Android**. Use your app's package name (see `applicationId` in
-`app/build.gradle`). Download **google-services.json** and put it in `app/`.
+## Permission prompt and notifications
 
-## 2. Gradle
-Project-level `build.gradle` (or `build.gradle.kts`) plugins block:
-    id 'com.google.gms.google-services' version '4.4.2' apply false
-`app/build.gradle` plugins block:
-    id 'com.google.gms.google-services'
-`app/build.gradle` dependencies:
-    implementation platform('com.google.firebase:firebase-bom:33.1.0')
-    implementation 'com.google.firebase:firebase-messaging'
-    implementation 'androidx.core:core-ktx:1.13.1'
+Capacitor Local Notifications and Push Notifications are registered as project dependencies.
+`capacitor.config.ts` points the APK at the deployed Room Ledger site. Deploy web changes to that
+site before testing the APK; otherwise it will keep loading the older deployed JavaScript. The
+app requests Android notification permission after the user taps **Allow** or **Turn on** in the app.
 
-## 3. Copy the 3 Kotlin files
-Copy `PushService.kt`, `NotificationHelper.kt`, `AndroidBridge.kt` into `app/src/main/java/<your/package>/`
-and change the `package` line at the top of each to your package name.
+If Android notifications were previously denied, enable them manually:
+**Android Settings → Apps → Room Ledger → Notifications**.
 
-## 4. AndroidManifest.xml
-Above `<application>`:
-    <uses-permission android:name="android.permission.INTERNET"/>
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
-Inside `<application>`:
-    <service android:name=".PushService" android:exported="false">
-      <intent-filter><action android:name="com.google.firebase.MESSAGING_EVENT"/></intent-filter>
-    </service>
-Also set `android:launchMode="singleTop"` on your MainActivity.
+## Firebase setup for pushes while the app is closed
 
-## 5. MainActivity (adapt to your code; BASE_URL = your deployed site, e.g. "https://your-app.vercel.app")
-In onCreate, BEFORE `webView.loadUrl(...)`:
-    webView.settings.javaScriptEnabled = true
-    webView.settings.domStorageEnabled = true
-    webView.addJavascriptInterface(AndroidBridge(this), "AndroidBridge")
-    AndroidBridge.refreshToken(this)
-Open the page from a notification tap (in onCreate after loadUrl, and also in onNewIntent):
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        intent.getStringExtra("link")?.let { webView.loadUrl(BASE_URL + it) }
-    }
-The app must load your deployed https site (not localhost), because the web app calls /api/push on its own origin.
+1. In Firebase Console, add an Android app with package name `com.roomledger.app`.
+2. Download its `google-services.json` and place it at
+   `android/app/google-services.json`.
+3. Configure `FIREBASE_SERVICE_ACCOUNT` on the server hosting `/api/push`, then redeploy.
+   Keep the service-account JSON on the server only; never put it in the APK or commit it.
+4. Build and install a new APK. Open Room Ledger, sign in, and allow notifications. The app
+   registers its FCM token in Firestore; send a test notification from another roommate.
 
-## 6. Server (Vercel, free Hobby plan)
-Set `FIREBASE_SERVICE_ACCOUNT` (service-account JSON, see PUSH_SETUP.md step 2) and redeploy.
-`VITE_FIREBASE_VAPID_KEY` is NOT needed for the Android app.
-Publish `firestore.rules` as described in PUSH_SETUP.md step 1.
+The web-push VAPID key is not used by the native Android APK.
 
-## 7. Test
-Rebuild the APK, install it, open the app, tap **Turn on** on the banner, allow notifications,
-close the app completely, then ask another roommate to nudge you (or use bell → Send test while the app is open).
+## Build
+
+From the project root, after deploying the web app:
+
+```powershell
+npm install
+npm run build
+npx cap sync android
+```
+
+Open the `android/` folder in Android Studio and build/install the app. Alternatively, with
+Android Studio's bundled Java runtime available:
+
+```powershell
+cd android
+.\gradlew.bat app:assembleDebug
+```

@@ -58,7 +58,15 @@ export const Route = createFileRoute("/api/push")({
               tokens,
               data: { title: n.title, body: n.body, link: n.link ?? "/", tag: id },
               webpush: { headers: { Urgency: "high", TTL: "86400" } },
-              android: { priority: "high", ttl: 86400 * 1000 },
+              android: {
+                priority: "high",
+                ttl: 86400 * 1000,
+                notification: {
+                  title: n.title,
+                  body: n.body,
+                  channelId: "room_ledger_alerts",
+                },
+              },
             });
             sent += res.successCount;
             // Drop tokens for uninstalled / revoked devices so they don't pile up.

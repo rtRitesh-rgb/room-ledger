@@ -8,7 +8,10 @@ import {
 } from "./ledger";
 import { formatPaise } from "./money";
 import { markAllRead, markRead, removeMany, removeNotification, sendNotification, type AppNotification } from "./notifications";
-import { nativeBridge, pushConfigured, registerPush, type PushResult } from "./push";
+import {
+  getNativeNotificationPermission, isNativeAndroid, nativeBridge,
+  registerPush, requestNativeNotificationPermission, showNativeNotification, type PushResult,
+} from "./push";
 
 type Permission = "unsupported" | "default" | "granted" | "denied";
 
@@ -39,10 +42,14 @@ const THIRTY_DAYS = 30 * 24 * 3600 * 1000;
 const loadSet = (key: string): Set<string> => { try { return new Set(JSON.parse(localStorage.getItem(key) ?? "[]") as string[]); } catch { return new Set(); } };
 const saveSet = (key: string, s: Set<string>) => { try { localStorage.setItem(key, JSON.stringify([...s].slice(-400))); } catch { /* ignore */ } };
 
-const getPermission = (): Permission => {
+const getPermission = async (): Promise<Permission> => {
   if (typeof window === "undefined") return "unsupported";
   const b = nativeBridge();
   if (b) return b.hasPermission() ? "granted" : "default";
+  if (isNativeAndroid()) {
+    const state = await getNativeNotificationPermission();
+    return state === "prompt" ? "default" : state;
+  }
   return !("Notification" in window) ? "unsupported" : (Notification.permission as Permission);
 };
 
@@ -50,6 +57,11 @@ const getPermission = (): Permission => {
 async function showDeviceAlert(n: AppNotification) {
   const b = nativeBridge();
   if (b) { try { b.show(n.title, n.body, n.link, n.id); } catch { /* ignore */ } return; } // Android app: native notification (same tag as the push, so it replaces instead of duplicating)
+  if (isNativeAndroid()) {
+    try { await showNativeNotification(n.title, n.body, n.link, n.id); }
+    catch (error) { console.error("Could not show Android notification", error); }
+    return;
+  }
   const opts: NotificationOptions = { body: n.body, icon: "/icons/icon-192.png", badge: "/icons/favicon-32.png", tag: n.id, data: { url: n.link } };
   try {
     // Phones (Android Chrome / installed apps) only allow notifications through the service worker.
@@ -71,7 +83,12 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   const firstLoad = useRef(true);
   const [pushState, setPushState] = useState<PushResult | "pending">("pending");
 
-  useEffect(() => setPermission(getPermission()), []);
+  useEffect(() => {
+    void getPermission().then(setPermission).catch((error) => {
+      console.error("Could not read notification permission", error);
+      setPermission("unsupported");
+    });
+  }, []);
 
   // 1) Live feed: only my own notifications (the rules enforce the same).
   useEffect(() => {
@@ -156,7 +173,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!loaded) return;
     try { void (navigator as Navigator & { setAppBadge?: (n: number) => Promise<void> }).setAppBadge?.(unread); } catch { /* unsupported */ }
-    if (getPermission() !== "granted") return; // (same tag as the background push, so the phone replaces instead of duplicating)
+    if (permission !== "granted") return; // (same tag as the background push, so the phone replaces instead of duplicating)
     const shown = loadSet(SHOWN_KEY);
     const fresh = items.filter((n) => !n.readAtMs && !shown.has(n.id));
     if (!fresh.length) return;
@@ -168,21 +185,29 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       fresh.slice(0, 3).forEach((n) => void showDeviceAlert(n));
     }
     firstLoad.current = false;
-  }, [items, loaded, unread]);
+  }, [items, loaded, permission, unread]);
 
   const enableAlerts = useCallback(async (): Promise<Permission> => {
-    if (getPermission() === "unsupported") return "unsupported";
-    const b = nativeBridge();
     let res: Permission;
-    if (b) {
-      b.requestPermission();
-      for (let i = 0; i < 60 && !b.hasPermission(); i++) await new Promise((r) => setTimeout(r, 500));
-      res = b.hasPermission() ? "granted" : "denied";
-    } else res = (await Notification.requestPermission()) as Permission;
+    try {
+      if (typeof window === "undefined") return "unsupported";
+      const b = nativeBridge();
+      if (b) {
+        b.requestPermission();
+        for (let i = 0; i < 60 && !b.hasPermission(); i++) await new Promise((r) => setTimeout(r, 500));
+        res = b.hasPermission() ? "granted" : "denied";
+      } else if (isNativeAndroid()) {
+        const nativePermission = await requestNativeNotificationPermission();
+        res = nativePermission === "prompt" ? "default" : nativePermission;
+      } else if (!("Notification" in window)) res = "unsupported";
+      else res = (await Notification.requestPermission()) as Permission;
+    } catch (error) {
+      console.error("Could not request notification permission", error);
+      res = "unsupported";
+    }
     setPermission(res);
-    if (res === "granted" && meId) setPushState(await registerPush(meId));
     return res;
-  }, [meId]);
+  }, []);
 
   const sendTest = useCallback(async (): Promise<"sent" | "blocked" | "failed"> => {
     if (!meId) return "failed";

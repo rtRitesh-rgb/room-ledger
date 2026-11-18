@@ -8,6 +8,7 @@ import { ResponsiveSheet, cx } from "./kit";
 import { useNotifications } from "@/lib/notify";
 import { useInstallPrompt } from "@/lib/pwa";
 import type { AppNotification, NotifType } from "@/lib/notifications";
+import { isNativeAndroid } from "@/lib/push";
 
 const ICONS: Record<NotifType, { icon: LucideIcon; tone: string }> = {
   nudge: { icon: Megaphone, tone: "bg-warning/20 text-warning-foreground dark:text-warning" },
@@ -70,7 +71,7 @@ function NotificationSheet({ onClose }: { onClose: () => void }) {
   const turnOn = async () => {
     const r = await enableAlerts();
     if (r === "granted") toast.success("Alerts are on for this device");
-    else if (r === "denied") toast.error("Alerts are blocked. Allow notifications for this site in your browser settings.");
+    else if (r === "denied") toast.error(isNativeAndroid() ? "Alerts are blocked. Allow notifications for Room Ledger in Android settings." : "Alerts are blocked. Allow notifications for this site in your browser settings.");
     else toast("Alerts aren't available here", { description: "On iPhone, first tap Share → Add to Home Screen, then open the installed app." });
   };
 
@@ -90,7 +91,11 @@ function NotificationSheet({ onClose }: { onClose: () => void }) {
             <span className="text-sm"><b>Turn on device alerts</b><span className="block text-xs opacity-80">Get a pop-up when someone nudges you or a bill is added while the app is open or in the background.</span></span>
           </button>
         ) : permission === "denied" ? (
-          <p className="rounded-xl bg-muted p-3 text-xs text-muted-foreground">Device alerts are blocked for this site. You'll still see everything here.</p>
+          <p className="rounded-xl bg-muted p-3 text-xs text-muted-foreground">
+            {isNativeAndroid()
+              ? "Device alerts are blocked for Room Ledger. Enable them in Android Settings → Apps → Room Ledger → Notifications."
+              : "Device alerts are blocked for this site. You'll still see everything here."}
+          </p>
         ) : null}
 
         {items.length > 0 ? (
