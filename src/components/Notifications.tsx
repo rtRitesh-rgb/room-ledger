@@ -1,10 +1,12 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { Bell, BellRing, CalendarClock, CheckCheck, HandCoins, Megaphone, Receipt, Trash2, Undo2, UserCog, Wallet, Zap, type LucideIcon } from "lucide-react";
+import { Bell, BellRing, CalendarClock, CheckCheck, HandCoins, Megaphone, Receipt, Trash2, Undo2, UserCog, Wallet, X, Zap, type LucideIcon } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { ResponsiveSheet, cx } from "./kit";
 import { useNotifications } from "@/lib/notify";
+import { pushConfigured } from "@/lib/push";
+import { useInstallPrompt } from "@/lib/pwa";
 import type { AppNotification, NotifType } from "@/lib/notifications";
 
 const ICONS: Record<NotifType, { icon: LucideIcon; tone: string }> = {
@@ -17,6 +19,7 @@ const ICONS: Record<NotifType, { icon: LucideIcon; tone: string }> = {
   bill: { icon: Zap, tone: "bg-primary/15 text-primary" },
   wallet: { icon: Wallet, tone: "bg-destructive/15 text-destructive" },
   manager: { icon: UserCog, tone: "bg-primary/15 text-primary" },
+  test: { icon: BellRing, tone: "bg-success/20 text-success" },
 };
 
 function ago(ms: number): string {
@@ -53,7 +56,7 @@ export function NotificationBell({ full }: { full?: boolean }) {
 }
 
 function NotificationSheet({ onClose }: { onClose: () => void }) {
-  const { items, unread, loaded, permission, enableAlerts, read, readAll, remove, clearRead } = useNotifications();
+  const { items, unread, loaded, permission, enableAlerts, pushState, sendTest, read, readAll, remove, clearRead } = useNotifications();
   const navigate = useNavigate();
   const hasRead = items.some((n) => n.readAtMs);
 
@@ -74,6 +77,13 @@ function NotificationSheet({ onClose }: { onClose: () => void }) {
   return (
     <ResponsiveSheet open onOpenChange={(o) => !o && onClose()} title="Notifications" description={unread ? `${unread} unread` : "You're all caught up"}>
       <div className="space-y-3 pb-2">
+        {permission === "granted" ? (
+          <div className="flex items-center gap-3 rounded-xl bg-muted p-3 text-xs text-muted-foreground">
+            <BellRing className="size-4 shrink-0 text-success" aria-hidden />
+            <span className="flex-1">{pushState === "ok" ? "Alerts are on for this phone, even when the app is closed." : pushConfigured ? "Alerts are on while the app is open. Background push isn't active on this device yet." : "Alerts are on while the app is open."}</span>
+            <Button size="sm" variant="outline" className="h-8" onClick={async () => { const r = await sendTest(); if (r === "blocked") toast.error("Couldn't send", { description: "Publish the latest firestore.rules in Firebase, then try again." }); else if (r === "failed") toast.error("Couldn't send the test. Check your connection."); }}>Send test</Button>
+          </div>
+        ) : null}
         {permission === "default" ? (
           <button type="button" onClick={() => void turnOn()} className="press flex w-full items-center gap-3 rounded-xl bg-accent p-3 text-left text-accent-foreground">
             <BellRing className="size-5 shrink-0" aria-hidden />
@@ -120,4 +130,37 @@ function NotificationSheet({ onClose }: { onClose: () => void }) {
       </div>
     </ResponsiveSheet>
   );
+}
+
+const DISMISS_KEY = "room-ledger-notif-prompt-dismissed";
+
+/** Friendly banner at the top of the app that asks for notification access (browsers require a tap to show the permission pop-up). */
+export function NotificationPrompt() {
+  const { permission, enableAlerts } = useNotifications();
+  const { iosHint } = useInstallPrompt();
+  const [hidden, setHidden] = useState(true);
+  useEffect(() => {
+    try { setHidden(Date.now() - Number(localStorage.getItem(DISMISS_KEY) ?? 0) < 7 * 24 * 3600 * 1000); } catch { setHidden(false); }
+  }, []);
+  if (hidden) return null;
+  const dismiss = () => { try { localStorage.setItem(DISMISS_KEY, String(Date.now())); } catch { /* ignore */ } setHidden(true); };
+
+  if (permission === "default")
+    return (
+      <div className="mb-4 flex items-center gap-3 rounded-2xl border border-primary/30 bg-primary/10 p-3" role="region" aria-label="Turn on notifications">
+        <span className="bg-grad-primary grid size-10 shrink-0 place-items-center rounded-full text-white"><BellRing className="size-5" aria-hidden /></span>
+        <p className="min-w-0 flex-1 text-sm"><b>Get nudges and reminders</b><span className="block text-xs text-muted-foreground">Know when a roommate nudges you, pays you, or the month is ending.</span></p>
+        <Button size="sm" className="h-9" onClick={async () => { const r = await enableAlerts(); if (r === "granted") { toast.success("Notifications are on"); setHidden(true); } else if (r === "denied") { toast.error("Blocked. Allow notifications for this app in your phone settings."); dismiss(); } }}>Turn on</Button>
+        <button type="button" aria-label="Not now" onClick={dismiss} className="press grid size-8 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-muted"><X className="size-4" /></button>
+      </div>
+    );
+  if (permission === "unsupported" && iosHint)
+    return (
+      <div className="mb-4 flex items-center gap-3 rounded-2xl border border-border bg-muted p-3 text-xs text-muted-foreground" role="note">
+        <BellRing className="size-5 shrink-0" aria-hidden />
+        <p className="flex-1">To get notifications on iPhone: tap Share → <b>Add to Home Screen</b>, then open Room Ledger from your home screen.</p>
+        <button type="button" aria-label="Dismiss" onClick={dismiss} className="press grid size-8 shrink-0 place-items-center rounded-full hover:bg-card"><X className="size-4" /></button>
+      </div>
+    );
+  return null;
 }

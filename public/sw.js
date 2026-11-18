@@ -5,7 +5,7 @@
  * - Never touches cross-origin requests (Firebase/Firestore, Supabase, etc.)
  *   or non-GET requests, so live data is never served stale.
  */
-const VERSION = "v2";
+const VERSION = "v3";
 const STATIC_CACHE = `room-ledger-static-${VERSION}`;
 const OFFLINE_URL = "/offline.html";
 
@@ -74,5 +74,21 @@ self.addEventListener("notificationclick", (event) => {
       }
       await self.clients.openWindow(target);
     })(),
+  );
+});
+
+// Real push (sent by /api/push through Firebase Cloud Messaging). Works even when the app is closed.
+self.addEventListener("push", (event) => {
+  let p = {};
+  try { p = event.data ? event.data.json() : {}; } catch (e) { /* not JSON */ }
+  const d = p.data || p.notification || p;
+  event.waitUntil(
+    self.registration.showNotification(d.title || "Room Ledger", {
+      body: d.body || "",
+      icon: "/icons/icon-192.png",
+      badge: "/icons/favicon-32.png",
+      tag: d.tag || undefined,
+      data: { url: d.link || "/" },
+    }),
   );
 });

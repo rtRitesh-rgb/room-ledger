@@ -110,6 +110,13 @@ service cloud.firestore {
       allow delete: if isMember() && resource.data.toId == myId();
     }
 
+    // Phone push tokens. Nobody can read them from the app; only the server (Admin SDK) does, to send pushes.
+    match /pushTokens/{token} {
+      allow read: if false;
+      allow create, update: if isMember() && request.resource.data.roommateId == myId();
+      allow delete: if isMember() && resource.data.roommateId == myId();
+    }
+
     // Append-only audit trail.
     match /audit/{id} {
       allow read: if isMember() && (isAdmin() || resource.data.actorId == myId());

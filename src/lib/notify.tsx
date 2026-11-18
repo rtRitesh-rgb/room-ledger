@@ -8,6 +8,7 @@ import {
 } from "./ledger";
 import { formatPaise } from "./money";
 import { markAllRead, markRead, removeMany, removeNotification, sendNotification, type AppNotification } from "./notifications";
+import { pushConfigured, registerPush, type PushResult } from "./push";
 
 type Permission = "unsupported" | "default" | "granted" | "denied";
 
@@ -17,6 +18,9 @@ type NotifyValue = {
   loaded: boolean;
   permission: Permission;
   enableAlerts: () => Promise<Permission>;
+  /** "ok" once this phone is registered for real push (works with the app closed). */
+  pushState: PushResult | "pending";
+  sendTest: () => Promise<"sent" | "blocked" | "failed">;
   read: (id: string) => void;
   readAll: () => void;
   remove: (id: string) => void;
@@ -25,7 +29,7 @@ type NotifyValue = {
 
 const Ctx = createContext<NotifyValue>({
   items: [], unread: 0, loaded: false, permission: "unsupported",
-  enableAlerts: async () => "unsupported", read: () => {}, readAll: () => {}, remove: () => {}, clearRead: () => {},
+  enableAlerts: async () => "unsupported", pushState: "pending", sendTest: async () => "failed", read: () => {}, readAll: () => {}, remove: () => {}, clearRead: () => {},
 });
 
 const MADE_KEY = "room-ledger-notif-made"; // ids of reminders this device already created (so deleted ones never come back)
@@ -55,6 +59,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   const [loaded, setLoaded] = useState(false);
   const [permission, setPermission] = useState<Permission>("unsupported");
   const firstLoad = useRef(true);
+  const [pushState, setPushState] = useState<PushResult | "pending">("pending");
 
   useEffect(() => setPermission(getPermission()), []);
 
@@ -131,11 +136,17 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     }
   }, [meId, me, loaded, loading, items, month, expenses, payments, monthDoc, allocations, wallet, settings.carryForward]);
 
+  // 3b) Real push: once alerts are allowed, register this phone for push (re-checked on every launch).
+  useEffect(() => {
+    if (!meId || permission !== "granted") return;
+    void registerPush(meId).then(setPushState);
+  }, [meId, permission]);
+
   // 4) Device alerts + app-icon badge for anything new and unread.
   useEffect(() => {
     if (!loaded) return;
     try { void (navigator as Navigator & { setAppBadge?: (n: number) => Promise<void> }).setAppBadge?.(unread); } catch { /* unsupported */ }
-    if (getPermission() !== "granted") return;
+    if (getPermission() !== "granted" || pushState === "ok") return; // with real push the phone already shows them
     const shown = loadSet(SHOWN_KEY);
     const fresh = items.filter((n) => !n.readAtMs && !shown.has(n.id));
     if (!fresh.length) return;
@@ -147,22 +158,33 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       fresh.slice(0, 3).forEach((n) => void showDeviceAlert(n));
     }
     firstLoad.current = false;
-  }, [items, loaded, unread]);
+  }, [items, loaded, unread, pushState]);
 
   const enableAlerts = useCallback(async (): Promise<Permission> => {
     if (getPermission() === "unsupported") return "unsupported";
     const res = (await Notification.requestPermission()) as Permission;
     setPermission(res);
+    if (res === "granted" && meId) setPushState(await registerPush(meId));
     return res;
-  }, []);
+  }, [meId]);
+
+  const sendTest = useCallback(async (): Promise<"sent" | "blocked" | "failed"> => {
+    if (!meId) return "failed";
+    try {
+      await sendNotification({ toId: meId, fromId: meId, type: "test", link: "/", title: "Test notification", body: "If you can read this, notifications are working on this device. 🎉" });
+      return "sent";
+    } catch (e) {
+      return (e as { code?: string }).code === "permission-denied" ? "blocked" : "failed";
+    }
+  }, [meId]);
 
   const value = useMemo<NotifyValue>(() => ({
-    items, unread, loaded, permission, enableAlerts,
+    items, unread, loaded, permission, enableAlerts, pushState, sendTest,
     read: (id) => void markRead(id).catch(() => {}),
     readAll: () => void markAllRead(items.filter((n) => !n.readAtMs).map((n) => n.id)).catch(() => {}),
     remove: (id) => void removeNotification(id).catch(() => {}),
     clearRead: () => void removeMany(items.filter((n) => n.readAtMs).map((n) => n.id)).catch(() => {}),
-  }), [items, unread, loaded, permission, enableAlerts]);
+  }), [items, unread, loaded, permission, enableAlerts, pushState, sendTest]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

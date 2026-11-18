@@ -52,6 +52,7 @@ function SettlePage() {
     const sent = results.filter((r) => r === "sent").length;
     if (sent) toast.success(`Nudged ${sent} ${sent === 1 ? "person" : "people"}`);
     else if (results.every((r) => r === "already")) toast("Everyone was already nudged today");
+    else if (results.some((r) => r === "blocked")) toast.error("Couldn't send the nudges", { description: "Either you already nudged them today, or the latest firestore.rules haven't been published in Firebase yet." });
     else toast.error("Couldn't send the nudges. Try again.");
   };
 
@@ -87,7 +88,8 @@ function Section({ title, hint, items, onOpen, onPay }: { title: string; hint: s
     const r = await nudge(me, { debtorId: b.fromId, amountPaise: b.remainingPaise, what: b.kind === "dues" ? "rent, fixed charges and meter bills" : "shared expenses" }, roommates.find((x) => x.id === me.id)?.upiId);
     setNudging(null);
     if (r === "sent") toast.success(`Nudged ${nameOf(b.fromId)}`);
-    else if (r === "already") toast(`You already nudged ${nameOf(b.fromId)} today`, { description: "Try again tomorrow. If this is your first nudge, publish the latest firestore.rules." });
+    else if (r === "already") toast(`You already nudged ${nameOf(b.fromId)} today`, { description: "Try again tomorrow." });
+    else if (r === "blocked") toast.error("Couldn't send the nudge", { description: "Either you already nudged them today, or the latest firestore.rules haven't been published in Firebase yet." });
     else toast.error("Couldn't send the nudge. Check your connection and try again.");
   };
   return (

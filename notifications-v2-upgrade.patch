@@ -1,0 +1,605 @@
+diff --git a/PUSH_SETUP.md b/PUSH_SETUP.md
+new file mode 100644
+index 0000000..02573b5
+--- /dev/null
++++ b/PUSH_SETUP.md
+@@ -0,0 +1,18 @@
++# Notifications setup
++
++## 1. Publish the Firestore rules (required for everything)
++Firebase console → **Firestore Database → Rules** → paste the whole `firestore.rules` → **Publish**.
++(Or: `npx firebase-tools login && npx firebase-tools deploy --only firestore:rules`.)
++Without this, saving your wallet and sending nudges fail with "permission denied".
++
++## 2. Phone push, works with the app closed (optional, ~5 min)
++1. Firebase console → **Project settings → Cloud Messaging → Web Push certificates → Generate key pair**.
++   Copy the key → Vercel env var **`VITE_FIREBASE_VAPID_KEY`**.
++2. Firebase console → **Project settings → Service accounts → Generate new private key**.
++   Paste the *entire JSON file contents* into the Vercel env var **`FIREBASE_SERVICE_ACCOUNT`** (keep it secret; never commit it).
++3. Vercel → **Redeploy**.
++4. On your phone open the app → tap **Turn on** on the banner → allow notifications → bell → **Send test**.
++
++Without step 2 the app still works: notifications show in the bell and as pop-ups while the app is open.
++
++Notes: iPhone needs the app added to the Home Screen first (Share → Add to Home Screen). The server route is `src/routes/api.push.ts`.
+diff --git a/firestore.rules b/firestore.rules
+index 9c4c034..ca0544b 100644
+--- a/firestore.rules
++++ b/firestore.rules
+@@ -110,6 +110,13 @@ service cloud.firestore {
+       allow delete: if isMember() && resource.data.toId == myId();
+     }
+ 
++    // Phone push tokens. Nobody can read them from the app; only the server (Admin SDK) does, to send pushes.
++    match /pushTokens/{token} {
++      allow read: if false;
++      allow create, update: if isMember() && request.resource.data.roommateId == myId();
++      allow delete: if isMember() && resource.data.roommateId == myId();
++    }
++
+     // Append-only audit trail.
+     match /audit/{id} {
+       allow read: if isMember() && (isAdmin() || resource.data.actorId == myId());
+diff --git a/public/sw.js b/public/sw.js
+index 0439b74..9ff1739 100644
+--- a/public/sw.js
++++ b/public/sw.js
+@@ -5,7 +5,7 @@
+  * - Never touches cross-origin requests (Firebase/Firestore, Supabase, etc.)
+  *   or non-GET requests, so live data is never served stale.
+  */
+-const VERSION = "v2";
++const VERSION = "v3";
+ const STATIC_CACHE = `room-ledger-static-${VERSION}`;
+ const OFFLINE_URL = "/offline.html";
+ 
+@@ -76,3 +76,19 @@ self.addEventListener("notificationclick", (event) => {
+     })(),
+   );
+ });
++
++// Real push (sent by /api/push through Firebase Cloud Messaging). Works even when the app is closed.
++self.addEventListener("push", (event) => {
++  let p = {};
++  try { p = event.data ? event.data.json() : {}; } catch (e) { /* not JSON */ }
++  const d = p.data || p.notification || p;
++  event.waitUntil(
++    self.registration.showNotification(d.title || "Room Ledger", {
++      body: d.body || "",
++      icon: "/icons/icon-192.png",
++      badge: "/icons/favicon-32.png",
++      tag: d.tag || undefined,
++      data: { url: d.link || "/" },
++    }),
++  );
++});
+diff --git a/src/components/Notifications.tsx b/src/components/Notifications.tsx
+index 60963e0..79f3a03 100644
+--- a/src/components/Notifications.tsx
++++ b/src/components/Notifications.tsx
+@@ -1,10 +1,12 @@
+-import { useState } from "react";
++import { useEffect, useState } from "react";
+ import { useNavigate } from "@tanstack/react-router";
+-import { Bell, BellRing, CalendarClock, CheckCheck, HandCoins, Megaphone, Receipt, Trash2, Undo2, UserCog, Wallet, Zap, type LucideIcon } from "lucide-react";
++import { Bell, BellRing, CalendarClock, CheckCheck, HandCoins, Megaphone, Receipt, Trash2, Undo2, UserCog, Wallet, X, Zap, type LucideIcon } from "lucide-react";
+ import { toast } from "sonner";
+ import { Button } from "@/components/ui/button";
+ import { ResponsiveSheet, cx } from "./kit";
+ import { useNotifications } from "@/lib/notify";
++import { pushConfigured } from "@/lib/push";
++import { useInstallPrompt } from "@/lib/pwa";
+ import type { AppNotification, NotifType } from "@/lib/notifications";
+ 
+ const ICONS: Record<NotifType, { icon: LucideIcon; tone: string }> = {
+@@ -17,6 +19,7 @@ const ICONS: Record<NotifType, { icon: LucideIcon; tone: string }> = {
+   bill: { icon: Zap, tone: "bg-primary/15 text-primary" },
+   wallet: { icon: Wallet, tone: "bg-destructive/15 text-destructive" },
+   manager: { icon: UserCog, tone: "bg-primary/15 text-primary" },
++  test: { icon: BellRing, tone: "bg-success/20 text-success" },
+ };
+ 
+ function ago(ms: number): string {
+@@ -53,7 +56,7 @@ export function NotificationBell({ full }: { full?: boolean }) {
+ }
+ 
+ function NotificationSheet({ onClose }: { onClose: () => void }) {
+-  const { items, unread, loaded, permission, enableAlerts, read, readAll, remove, clearRead } = useNotifications();
++  const { items, unread, loaded, permission, enableAlerts, pushState, sendTest, read, readAll, remove, clearRead } = useNotifications();
+   const navigate = useNavigate();
+   const hasRead = items.some((n) => n.readAtMs);
+ 
+@@ -74,6 +77,13 @@ function NotificationSheet({ onClose }: { onClose: () => void }) {
+   return (
+     <ResponsiveSheet open onOpenChange={(o) => !o && onClose()} title="Notifications" description={unread ? `${unread} unread` : "You're all caught up"}>
+       <div className="space-y-3 pb-2">
++        {permission === "granted" ? (
++          <div className="flex items-center gap-3 rounded-xl bg-muted p-3 text-xs text-muted-foreground">
++            <BellRing className="size-4 shrink-0 text-success" aria-hidden />
++            <span className="flex-1">{pushState === "ok" ? "Alerts are on for this phone, even when the app is closed." : pushConfigured ? "Alerts are on while the app is open. Background push isn't active on this device yet." : "Alerts are on while the app is open."}</span>
++            <Button size="sm" variant="outline" className="h-8" onClick={async () => { const r = await sendTest(); if (r === "blocked") toast.error("Couldn't send", { description: "Publish the latest firestore.rules in Firebase, then try again." }); else if (r === "failed") toast.error("Couldn't send the test. Check your connection."); }}>Send test</Button>
++          </div>
++        ) : null}
+         {permission === "default" ? (
+           <button type="button" onClick={() => void turnOn()} className="press flex w-full items-center gap-3 rounded-xl bg-accent p-3 text-left text-accent-foreground">
+             <BellRing className="size-5 shrink-0" aria-hidden />
+@@ -121,3 +131,36 @@ function NotificationSheet({ onClose }: { onClose: () => void }) {
+     </ResponsiveSheet>
+   );
+ }
++
++const DISMISS_KEY = "room-ledger-notif-prompt-dismissed";
++
++/** Friendly banner at the top of the app that asks for notification access (browsers require a tap to show the permission pop-up). */
++export function NotificationPrompt() {
++  const { permission, enableAlerts } = useNotifications();
++  const { iosHint } = useInstallPrompt();
++  const [hidden, setHidden] = useState(true);
++  useEffect(() => {
++    try { setHidden(Date.now() - Number(localStorage.getItem(DISMISS_KEY) ?? 0) < 7 * 24 * 3600 * 1000); } catch { setHidden(false); }
++  }, []);
++  if (hidden) return null;
++  const dismiss = () => { try { localStorage.setItem(DISMISS_KEY, String(Date.now())); } catch { /* ignore */ } setHidden(true); };
++
++  if (permission === "default")
++    return (
++      <div className="mb-4 flex items-center gap-3 rounded-2xl border border-primary/30 bg-primary/10 p-3" role="region" aria-label="Turn on notifications">
++        <span className="bg-grad-primary grid size-10 shrink-0 place-items-center rounded-full text-white"><BellRing className="size-5" aria-hidden /></span>
++        <p className="min-w-0 flex-1 text-sm"><b>Get nudges and reminders</b><span className="block text-xs text-muted-foreground">Know when a roommate nudges you, pays you, or the month is ending.</span></p>
++        <Button size="sm" className="h-9" onClick={async () => { const r = await enableAlerts(); if (r === "granted") { toast.success("Notifications are on"); setHidden(true); } else if (r === "denied") { toast.error("Blocked. Allow notifications for this app in your phone settings."); dismiss(); } }}>Turn on</Button>
++        <button type="button" aria-label="Not now" onClick={dismiss} className="press grid size-8 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-muted"><X className="size-4" /></button>
++      </div>
++    );
++  if (permission === "unsupported" && iosHint)
++    return (
++      <div className="mb-4 flex items-center gap-3 rounded-2xl border border-border bg-muted p-3 text-xs text-muted-foreground" role="note">
++        <BellRing className="size-5 shrink-0" aria-hidden />
++        <p className="flex-1">To get notifications on iPhone: tap Share → <b>Add to Home Screen</b>, then open Room Ledger from your home screen.</p>
++        <button type="button" aria-label="Dismiss" onClick={dismiss} className="press grid size-8 shrink-0 place-items-center rounded-full hover:bg-card"><X className="size-4" /></button>
++      </div>
++    );
++  return null;
++}
+diff --git a/src/components/Shell.tsx b/src/components/Shell.tsx
+index 4928e2b..98efddf 100644
+--- a/src/components/Shell.tsx
++++ b/src/components/Shell.tsx
+@@ -15,7 +15,7 @@ import { SessionProvider, useSession } from "@/lib/session";
+ import { useTheme, type ThemePref } from "@/lib/theme";
+ import { useInstallPrompt } from "@/lib/pwa";
+ import { NotificationsProvider } from "@/lib/notify";
+-import { NotificationBell } from "./Notifications";
++import { NotificationBell, NotificationPrompt } from "./Notifications";
+ import type { Roommate } from "@/lib/ledger";
+ 
+ const NAV = [
+@@ -175,6 +175,7 @@ function AppFrame({ children }: { children: ReactNode }) {
+       </header>
+ 
+       <main className="mx-auto w-full max-w-5xl px-4 pb-28 pt-4 md:px-8 md:pb-10 md:pt-8">
++        <NotificationPrompt />
+         {error ? <ErrorBlock message={`Couldn't load data: ${error}`} /> : children}
+       </main>
+ 
+diff --git a/src/lib/notifications.ts b/src/lib/notifications.ts
+index c85424e..ef2b57f 100644
+--- a/src/lib/notifications.ts
++++ b/src/lib/notifications.ts
+@@ -1,6 +1,7 @@
+ import { collection, deleteDoc, doc, setDoc, updateDoc, writeBatch } from "firebase/firestore";
+ import { db } from "./firebase";
+ import { formatPaise, type Paise } from "./money";
++import { requestPush } from "./push";
+ 
+ /**
+  * In-app notifications, stored in Firestore (`notifications`). Only the recipient can read them
+@@ -8,7 +9,7 @@ import { formatPaise, type Paise } from "./money";
+  * expense / payment / bill that triggered it.
+  */
+ 
+-export type NotifType = "nudge" | "month_end" | "new_month" | "expense" | "payment" | "reversal" | "bill" | "wallet" | "manager";
++export type NotifType = "nudge" | "month_end" | "new_month" | "expense" | "payment" | "reversal" | "bill" | "wallet" | "manager" | "test";
+ 
+ export type AppNotification = {
+   id: string;
+@@ -35,6 +36,8 @@ export const dayKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMont
+ export async function sendNotification(n: NewNotification, id?: string): Promise<void> {
+   const ref = id ? doc(db, COL, id) : doc(collection(db, COL));
+   await setDoc(ref, { ...n, amountPaise: n.amountPaise ?? null, createdAtMs: now(), readAtMs: null });
++  // Ask the server to also push it to the recipient's phone (skipped for reminders I write to myself).
++  if (n.toId !== n.fromId || n.type === "test") void requestPush([ref.id]);
+ }
+ 
+ /** Fire-and-forget version used after saves: never throws. */
+@@ -69,7 +72,7 @@ export type NudgeTarget = { debtorId: string; amountPaise: Paise; what: string }
+ const NUDGED_KEY = "room-ledger-nudged";
+ const readNudged = (): Record<string, true> => { try { return JSON.parse(localStorage.getItem(NUDGED_KEY) ?? "{}"); } catch { return {}; } };
+ 
+-export type NudgeResult = "sent" | "already" | "failed";
++export type NudgeResult = "sent" | "already" | "blocked" | "failed";
+ 
+ /**
+  * Sends one friendly reminder. The id is `nudge_<me>_<them>_<date>`, so each person can be nudged at most once per day
+@@ -89,8 +92,9 @@ export async function nudge(me: { id: string; name: string }, t: NudgeTarget, up
+     try { localStorage.setItem(NUDGED_KEY, JSON.stringify({ ...Object.fromEntries(Object.keys(seen).slice(-200).map((k) => [k, true])), [id]: true })); } catch { /* storage full or blocked */ }
+     return "sent";
+   } catch (e) {
+-    // A refusal on a deterministic id almost always means today's nudge already exists.
+-    return (e as { code?: string }).code === "permission-denied" ? "already" : "failed";
++    // The database refuses with "permission denied" both when today's nudge already exists and when the latest
++    // firestore.rules haven't been published, so report it as "blocked" and let the UI explain both.
++    return (e as { code?: string }).code === "permission-denied" ? "blocked" : "failed";
+   }
+ }
+ 
+diff --git a/src/lib/notify.tsx b/src/lib/notify.tsx
+index a333e0f..1834052 100644
+--- a/src/lib/notify.tsx
++++ b/src/lib/notify.tsx
+@@ -8,6 +8,7 @@ import {
+ } from "./ledger";
+ import { formatPaise } from "./money";
+ import { markAllRead, markRead, removeMany, removeNotification, sendNotification, type AppNotification } from "./notifications";
++import { pushConfigured, registerPush, type PushResult } from "./push";
+ 
+ type Permission = "unsupported" | "default" | "granted" | "denied";
+ 
+@@ -17,6 +18,9 @@ type NotifyValue = {
+   loaded: boolean;
+   permission: Permission;
+   enableAlerts: () => Promise<Permission>;
++  /** "ok" once this phone is registered for real push (works with the app closed). */
++  pushState: PushResult | "pending";
++  sendTest: () => Promise<"sent" | "blocked" | "failed">;
+   read: (id: string) => void;
+   readAll: () => void;
+   remove: (id: string) => void;
+@@ -25,7 +29,7 @@ type NotifyValue = {
+ 
+ const Ctx = createContext<NotifyValue>({
+   items: [], unread: 0, loaded: false, permission: "unsupported",
+-  enableAlerts: async () => "unsupported", read: () => {}, readAll: () => {}, remove: () => {}, clearRead: () => {},
++  enableAlerts: async () => "unsupported", pushState: "pending", sendTest: async () => "failed", read: () => {}, readAll: () => {}, remove: () => {}, clearRead: () => {},
+ });
+ 
+ const MADE_KEY = "room-ledger-notif-made"; // ids of reminders this device already created (so deleted ones never come back)
+@@ -55,6 +59,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
+   const [loaded, setLoaded] = useState(false);
+   const [permission, setPermission] = useState<Permission>("unsupported");
+   const firstLoad = useRef(true);
++  const [pushState, setPushState] = useState<PushResult | "pending">("pending");
+ 
+   useEffect(() => setPermission(getPermission()), []);
+ 
+@@ -131,11 +136,17 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
+     }
+   }, [meId, me, loaded, loading, items, month, expenses, payments, monthDoc, allocations, wallet, settings.carryForward]);
+ 
++  // 3b) Real push: once alerts are allowed, register this phone for push (re-checked on every launch).
++  useEffect(() => {
++    if (!meId || permission !== "granted") return;
++    void registerPush(meId).then(setPushState);
++  }, [meId, permission]);
++
+   // 4) Device alerts + app-icon badge for anything new and unread.
+   useEffect(() => {
+     if (!loaded) return;
+     try { void (navigator as Navigator & { setAppBadge?: (n: number) => Promise<void> }).setAppBadge?.(unread); } catch { /* unsupported */ }
+-    if (getPermission() !== "granted") return;
++    if (getPermission() !== "granted" || pushState === "ok") return; // with real push the phone already shows them
+     const shown = loadSet(SHOWN_KEY);
+     const fresh = items.filter((n) => !n.readAtMs && !shown.has(n.id));
+     if (!fresh.length) return;
+@@ -147,22 +158,33 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
+       fresh.slice(0, 3).forEach((n) => void showDeviceAlert(n));
+     }
+     firstLoad.current = false;
+-  }, [items, loaded, unread]);
++  }, [items, loaded, unread, pushState]);
+ 
+   const enableAlerts = useCallback(async (): Promise<Permission> => {
+     if (getPermission() === "unsupported") return "unsupported";
+     const res = (await Notification.requestPermission()) as Permission;
+     setPermission(res);
++    if (res === "granted" && meId) setPushState(await registerPush(meId));
+     return res;
+-  }, []);
++  }, [meId]);
++
++  const sendTest = useCallback(async (): Promise<"sent" | "blocked" | "failed"> => {
++    if (!meId) return "failed";
++    try {
++      await sendNotification({ toId: meId, fromId: meId, type: "test", link: "/", title: "Test notification", body: "If you can read this, notifications are working on this device. 🎉" });
++      return "sent";
++    } catch (e) {
++      return (e as { code?: string }).code === "permission-denied" ? "blocked" : "failed";
++    }
++  }, [meId]);
+ 
+   const value = useMemo<NotifyValue>(() => ({
+-    items, unread, loaded, permission, enableAlerts,
++    items, unread, loaded, permission, enableAlerts, pushState, sendTest,
+     read: (id) => void markRead(id).catch(() => {}),
+     readAll: () => void markAllRead(items.filter((n) => !n.readAtMs).map((n) => n.id)).catch(() => {}),
+     remove: (id) => void removeNotification(id).catch(() => {}),
+     clearRead: () => void removeMany(items.filter((n) => n.readAtMs).map((n) => n.id)).catch(() => {}),
+-  }), [items, unread, loaded, permission, enableAlerts]);
++  }), [items, unread, loaded, permission, enableAlerts, pushState, sendTest]);
+ 
+   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+ }
+diff --git a/src/lib/push.ts b/src/lib/push.ts
+new file mode 100644
+index 0000000..3fdb5de
+--- /dev/null
++++ b/src/lib/push.ts
+@@ -0,0 +1,51 @@
++import { getApp } from "firebase/app";
++import { doc, setDoc } from "firebase/firestore";
++import { auth, db } from "./firebase";
++
++/**
++ * Real push (works with the app closed): the browser gets a Firebase Cloud Messaging token, we store it in
++ * `pushTokens`, and /api/push (a small server route) sends the push when someone nudges you or an activity happens.
++ * Needs VITE_FIREBASE_VAPID_KEY (public) here and FIREBASE_SERVICE_ACCOUNT (secret) on the server. See PUSH_SETUP.md.
++ */
++const VAPID = import.meta.env["VITE_FIREBASE_VAPID_KEY"] as string | undefined;
++export const pushConfigured = Boolean(VAPID);
++
++export type PushResult = "ok" | "no-key" | "no-permission" | "unsupported" | "failed";
++
++export async function pushSupported(): Promise<boolean> {
++  if (typeof window === "undefined" || !("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) return false;
++  try {
++    const { isSupported } = await import("firebase/messaging");
++    return await isSupported();
++  } catch {
++    return false;
++  }
++}
++
++/** Gets this device's push token and saves it against the signed-in roommate. Safe to call on every launch. */
++export async function registerPush(roommateId: string): Promise<PushResult> {
++  if (!VAPID) return "no-key";
++  if (typeof Notification === "undefined" || Notification.permission !== "granted") return "no-permission";
++  if (!(await pushSupported())) return "unsupported";
++  try {
++    const reg = await navigator.serviceWorker.getRegistration();
++    if (!reg) return "unsupported"; // the service worker only runs in the production build
++    const { getMessaging, getToken } = await import("firebase/messaging");
++    const token = await getToken(getMessaging(getApp()), { vapidKey: VAPID, serviceWorkerRegistration: reg });
++    if (!token) return "failed";
++    await setDoc(doc(db, "pushTokens", token), { roommateId, createdAtMs: Date.now(), agent: navigator.userAgent.slice(0, 120) });
++    return "ok";
++  } catch {
++    return "failed";
++  }
++}
++
++/** Asks the server to push the given notification ids. Best effort: the in-app bell never depends on it. */
++export async function requestPush(ids: string[]): Promise<void> {
++  if (!ids.length) return;
++  try {
++    const t = await auth?.currentUser?.getIdToken();
++    if (!t) return;
++    await fetch("/api/push", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${t}` }, body: JSON.stringify({ ids }) });
++  } catch { /* offline or push not set up */ }
++}
+diff --git a/src/routeTree.gen.ts b/src/routeTree.gen.ts
+index fc6ccc5..1a20a34 100644
+--- a/src/routeTree.gen.ts
++++ b/src/routeTree.gen.ts
+@@ -17,6 +17,7 @@ import { Route as ProfileRouteImport } from './routes/profile'
+ import { Route as RecordsRouteImport } from './routes/records'
+ import { Route as SettlementRouteImport } from './routes/settlement'
+ import { Route as UtilitiesRouteImport } from './routes/utilities'
++import { Route as ApiPushRouteImport } from './routes/api.push'
+ 
+ const IndexRoute = IndexRouteImport.update({
+   id: '/',
+@@ -58,6 +59,11 @@ const UtilitiesRoute = UtilitiesRouteImport.update({
+   path: '/utilities',
+   getParentRoute: () => rootRouteImport,
+ } as any)
++const ApiPushRoute = ApiPushRouteImport.update({
++  id: '/api/push',
++  path: '/api/push',
++  getParentRoute: () => rootRouteImport,
++} as any)
+ 
+ export interface FileRoutesByFullPath {
+   '/': typeof IndexRoute
+@@ -68,6 +74,7 @@ export interface FileRoutesByFullPath {
+   '/records': typeof RecordsRoute
+   '/settlement': typeof SettlementRoute
+   '/utilities': typeof UtilitiesRoute
++  '/api/push': typeof ApiPushRoute
+ }
+ export interface FileRoutesByTo {
+   '/': typeof IndexRoute
+@@ -78,6 +85,7 @@ export interface FileRoutesByTo {
+   '/records': typeof RecordsRoute
+   '/settlement': typeof SettlementRoute
+   '/utilities': typeof UtilitiesRoute
++  '/api/push': typeof ApiPushRoute
+ }
+ export interface FileRoutesById {
+   __root__: typeof rootRouteImport
+@@ -89,6 +97,7 @@ export interface FileRoutesById {
+   '/records': typeof RecordsRoute
+   '/settlement': typeof SettlementRoute
+   '/utilities': typeof UtilitiesRoute
++  '/api/push': typeof ApiPushRoute
+ }
+ export interface FileRouteTypes {
+   fileRoutesByFullPath: FileRoutesByFullPath
+@@ -101,6 +110,7 @@ export interface FileRouteTypes {
+     | '/records'
+     | '/settlement'
+     | '/utilities'
++    | '/api/push'
+   fileRoutesByTo: FileRoutesByTo
+   to:
+     | '/'
+@@ -111,6 +121,7 @@ export interface FileRouteTypes {
+     | '/records'
+     | '/settlement'
+     | '/utilities'
++    | '/api/push'
+   id:
+     | '__root__'
+     | '/'
+@@ -121,6 +132,7 @@ export interface FileRouteTypes {
+     | '/records'
+     | '/settlement'
+     | '/utilities'
++    | '/api/push'
+   fileRoutesById: FileRoutesById
+ }
+ export interface RootRouteChildren {
+@@ -132,6 +144,7 @@ export interface RootRouteChildren {
+   RecordsRoute: typeof RecordsRoute
+   SettlementRoute: typeof SettlementRoute
+   UtilitiesRoute: typeof UtilitiesRoute
++  ApiPushRoute: typeof ApiPushRoute
+ }
+ 
+ declare module '@tanstack/react-router' {
+@@ -192,6 +205,13 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof UtilitiesRouteImport
+       parentRoute: typeof rootRouteImport
+     }
++    '/api/push': {
++      id: '/api/push'
++      path: '/api/push'
++      fullPath: '/api/push'
++      preLoaderRoute: typeof ApiPushRouteImport
++      parentRoute: typeof rootRouteImport
++    }
+   }
+ }
+ 
+@@ -204,6 +224,7 @@ const rootRouteChildren: RootRouteChildren = {
+   RecordsRoute: RecordsRoute,
+   SettlementRoute: SettlementRoute,
+   UtilitiesRoute: UtilitiesRoute,
++  ApiPushRoute: ApiPushRoute,
+ }
+ export const routeTree = rootRouteImport
+   ._addFileChildren(rootRouteChildren)
+diff --git a/src/routes/api.push.ts b/src/routes/api.push.ts
+new file mode 100644
+index 0000000..710a264
+--- /dev/null
++++ b/src/routes/api.push.ts
+@@ -0,0 +1,74 @@
++import { createFileRoute } from "@tanstack/react-router";
++
++/**
++ * POST /api/push  { ids: string[] }  with  Authorization: Bearer <Firebase ID token>
++ * Sends a phone push for notifications the caller just created. Server-only (uses the Firebase Admin SDK).
++ * Needs the FIREBASE_SERVICE_ACCOUNT environment variable (service-account JSON). Without it this returns 503 and
++ * the app keeps working with in-app notifications only.
++ */
++const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
++
++async function getAdmin() {
++  const raw = process.env["FIREBASE_SERVICE_ACCOUNT"];
++  if (!raw) return null;
++  const [{ cert, getApps, initializeApp }, { getAuth }, { getFirestore }, { getMessaging }] = await Promise.all([
++    import("firebase-admin/app"), import("firebase-admin/auth"), import("firebase-admin/firestore"), import("firebase-admin/messaging"),
++  ]);
++  const sa = JSON.parse(raw) as { private_key?: string };
++  if (sa.private_key) sa.private_key = sa.private_key.replace(/\\n/g, "\n");
++  const app = getApps()[0] ?? initializeApp({ credential: cert(sa as never) });
++  return { auth: getAuth(app), db: getFirestore(app), messaging: getMessaging(app) };
++}
++
++export const Route = createFileRoute("/api/push")({
++  server: {
++    handlers: {
++      POST: async ({ request }: { request: Request }) => {
++        const bearer = /^Bearer (.+)$/.exec(request.headers.get("authorization") ?? "")?.[1];
++        if (!bearer) return json(401, { error: "Sign in required." });
++        let ids: string[] = [];
++        try {
++          const body = (await request.json()) as { ids?: unknown };
++          ids = Array.isArray(body.ids) ? body.ids.filter((x): x is string => typeof x === "string" && x.length > 0 && x.length < 200).slice(0, 20) : [];
++        } catch { return json(400, { error: "Bad request." }); }
++        if (!ids.length) return json(400, { error: "No notification ids." });
++
++        let admin;
++        try { admin = await getAdmin(); } catch (e) { console.error("push: admin init failed", e); return json(503, { error: "Push is misconfigured." }); }
++        if (!admin) return json(503, { error: "Push is not set up on the server." });
++
++        try {
++          const { uid } = await admin.auth.verifyIdToken(bearer);
++          const member = await admin.db.collection("members").doc(uid).get();
++          const callerId = (member.data() as { roommateId?: string } | undefined)?.roommateId;
++          if (!callerId) return json(403, { error: "Not a household member." });
++
++          let sent = 0;
++          for (const id of ids) {
++            const ref = admin.db.collection("notifications").doc(id);
++            const snap = await ref.get();
++            const n = snap.data() as { fromId: string; toId: string; title: string; body: string; link?: string; createdAtMs: number; pushedAtMs?: number } | undefined;
++            // Only the sender can trigger a push, only once, and only for a fresh notification.
++            if (!n || n.fromId !== callerId || n.pushedAtMs || Date.now() - n.createdAtMs > 10 * 60 * 1000) continue;
++            await ref.update({ pushedAtMs: Date.now() });
++            const tokSnap = await admin.db.collection("pushTokens").where("roommateId", "==", n.toId).get();
++            const tokens = tokSnap.docs.map((d) => d.id);
++            if (!tokens.length) continue;
++            const res = await admin.messaging.sendEachForMulticast({
++              tokens,
++              data: { title: n.title, body: n.body, link: n.link ?? "/", tag: id },
++              webpush: { headers: { Urgency: "high", TTL: "86400" } },
++            });
++            sent += res.successCount;
++            // Drop tokens for uninstalled / revoked devices so they don't pile up.
++            await Promise.all(res.responses.map((r, i) => (!r.success && /registration-token-not-registered|invalid-registration-token|invalid-argument/.test(r.error?.code ?? "") ? admin.db.collection("pushTokens").doc(tokens[i]!).delete() : null)));
++          }
++          return json(200, { sent });
++        } catch (e) {
++          console.error("push failed", e);
++          return json(401, { error: "Couldn't verify your session." });
++        }
++      },
++    },
++  },
++});
+diff --git a/src/routes/settlement.tsx b/src/routes/settlement.tsx
+index 6ecdfd8..f63565d 100644
+--- a/src/routes/settlement.tsx
++++ b/src/routes/settlement.tsx
+@@ -52,6 +52,7 @@ function SettlePage() {
+     const sent = results.filter((r) => r === "sent").length;
+     if (sent) toast.success(`Nudged ${sent} ${sent === 1 ? "person" : "people"}`);
+     else if (results.every((r) => r === "already")) toast("Everyone was already nudged today");
++    else if (results.some((r) => r === "blocked")) toast.error("Couldn't send the nudges", { description: "Either you already nudged them today, or the latest firestore.rules haven't been published in Firebase yet." });
+     else toast.error("Couldn't send the nudges. Try again.");
+   };
+ 
+@@ -87,7 +88,8 @@ function Section({ title, hint, items, onOpen, onPay }: { title: string; hint: s
+     const r = await nudge(me, { debtorId: b.fromId, amountPaise: b.remainingPaise, what: b.kind === "dues" ? "rent, fixed charges and meter bills" : "shared expenses" }, roommates.find((x) => x.id === me.id)?.upiId);
+     setNudging(null);
+     if (r === "sent") toast.success(`Nudged ${nameOf(b.fromId)}`);
+-    else if (r === "already") toast(`You already nudged ${nameOf(b.fromId)} today`, { description: "Try again tomorrow. If this is your first nudge, publish the latest firestore.rules." });
++    else if (r === "already") toast(`You already nudged ${nameOf(b.fromId)} today`, { description: "Try again tomorrow." });
++    else if (r === "blocked") toast.error("Couldn't send the nudge", { description: "Either you already nudged them today, or the latest firestore.rules haven't been published in Firebase yet." });
+     else toast.error("Couldn't send the nudge. Check your connection and try again.");
+   };
+   return (
+diff --git a/vite.config.ts b/vite.config.ts
+index 174e074..9b6b939 100644
+--- a/vite.config.ts
++++ b/vite.config.ts
+@@ -7,6 +7,9 @@
+ import { defineConfig } from "@lovable.dev/vite-tanstack-config";
+ 
+ export default defineConfig({
++  // Keep the Firebase Admin SDK (used only by the /api/push route) as a real node_modules dependency instead of
++  // bundling it into the server build, where its CommonJS internals break.
++  nitro: { traceDeps: ["firebase-admin", "@google-cloud/firestore", "@google-cloud/storage", "google-gax", "@grpc/grpc-js"] },
+   tanstackStart: {
+     // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
+     // nitro/vite builds from this

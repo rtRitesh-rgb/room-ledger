@@ -7,6 +7,9 @@
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
 export default defineConfig({
+  // Keep the Firebase Admin SDK (used only by the /api/push route) as a real node_modules dependency instead of
+  // bundling it into the server build, where its CommonJS internals break.
+  nitro: { traceDeps: ["firebase-admin", "@google-cloud/firestore", "@google-cloud/storage", "google-gax", "@grpc/grpc-js"] },
   tanstackStart: {
     // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
     // nitro/vite builds from this

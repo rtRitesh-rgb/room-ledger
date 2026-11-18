@@ -1,6 +1,7 @@
 import { collection, deleteDoc, doc, setDoc, updateDoc, writeBatch } from "firebase/firestore";
 import { db } from "./firebase";
 import { formatPaise, type Paise } from "./money";
+import { requestPush } from "./push";
 
 /**
  * In-app notifications, stored in Firestore (`notifications`). Only the recipient can read them
@@ -8,7 +9,7 @@ import { formatPaise, type Paise } from "./money";
  * expense / payment / bill that triggered it.
  */
 
-export type NotifType = "nudge" | "month_end" | "new_month" | "expense" | "payment" | "reversal" | "bill" | "wallet" | "manager";
+export type NotifType = "nudge" | "month_end" | "new_month" | "expense" | "payment" | "reversal" | "bill" | "wallet" | "manager" | "test";
 
 export type AppNotification = {
   id: string;
@@ -35,6 +36,8 @@ export const dayKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMont
 export async function sendNotification(n: NewNotification, id?: string): Promise<void> {
   const ref = id ? doc(db, COL, id) : doc(collection(db, COL));
   await setDoc(ref, { ...n, amountPaise: n.amountPaise ?? null, createdAtMs: now(), readAtMs: null });
+  // Ask the server to also push it to the recipient's phone (skipped for reminders I write to myself).
+  if (n.toId !== n.fromId || n.type === "test") void requestPush([ref.id]);
 }
 
 /** Fire-and-forget version used after saves: never throws. */
@@ -69,7 +72,7 @@ export type NudgeTarget = { debtorId: string; amountPaise: Paise; what: string }
 const NUDGED_KEY = "room-ledger-nudged";
 const readNudged = (): Record<string, true> => { try { return JSON.parse(localStorage.getItem(NUDGED_KEY) ?? "{}"); } catch { return {}; } };
 
-export type NudgeResult = "sent" | "already" | "failed";
+export type NudgeResult = "sent" | "already" | "blocked" | "failed";
 
 /**
  * Sends one friendly reminder. The id is `nudge_<me>_<them>_<date>`, so each person can be nudged at most once per day
@@ -89,8 +92,9 @@ export async function nudge(me: { id: string; name: string }, t: NudgeTarget, up
     try { localStorage.setItem(NUDGED_KEY, JSON.stringify({ ...Object.fromEntries(Object.keys(seen).slice(-200).map((k) => [k, true])), [id]: true })); } catch { /* storage full or blocked */ }
     return "sent";
   } catch (e) {
-    // A refusal on a deterministic id almost always means today's nudge already exists.
-    return (e as { code?: string }).code === "permission-denied" ? "already" : "failed";
+    // The database refuses with "permission denied" both when today's nudge already exists and when the latest
+    // firestore.rules haven't been published, so report it as "blocked" and let the UI explain both.
+    return (e as { code?: string }).code === "permission-denied" ? "blocked" : "failed";
   }
 }
 

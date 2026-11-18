@@ -15,7 +15,7 @@ import { SessionProvider, useSession } from "@/lib/session";
 import { useTheme, type ThemePref } from "@/lib/theme";
 import { useInstallPrompt } from "@/lib/pwa";
 import { NotificationsProvider } from "@/lib/notify";
-import { NotificationBell } from "./Notifications";
+import { NotificationBell, NotificationPrompt } from "./Notifications";
 import type { Roommate } from "@/lib/ledger";
 
 const NAV = [
@@ -175,6 +175,7 @@ function AppFrame({ children }: { children: ReactNode }) {
       </header>
 
       <main className="mx-auto w-full max-w-5xl px-4 pb-28 pt-4 md:px-8 md:pb-10 md:pt-8">
+        <NotificationPrompt />
         {error ? <ErrorBlock message={`Couldn't load data: ${error}`} /> : children}
       </main>
 

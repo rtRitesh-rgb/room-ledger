@@ -17,6 +17,7 @@ import { Route as ProfileRouteImport } from './routes/profile'
 import { Route as RecordsRouteImport } from './routes/records'
 import { Route as SettlementRouteImport } from './routes/settlement'
 import { Route as UtilitiesRouteImport } from './routes/utilities'
+import { Route as ApiPushRouteImport } from './routes/api.push'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -58,6 +59,11 @@ const UtilitiesRoute = UtilitiesRouteImport.update({
   path: '/utilities',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiPushRoute = ApiPushRouteImport.update({
+  id: '/api/push',
+  path: '/api/push',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -68,6 +74,7 @@ export interface FileRoutesByFullPath {
   '/records': typeof RecordsRoute
   '/settlement': typeof SettlementRoute
   '/utilities': typeof UtilitiesRoute
+  '/api/push': typeof ApiPushRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -78,6 +85,7 @@ export interface FileRoutesByTo {
   '/records': typeof RecordsRoute
   '/settlement': typeof SettlementRoute
   '/utilities': typeof UtilitiesRoute
+  '/api/push': typeof ApiPushRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -89,6 +97,7 @@ export interface FileRoutesById {
   '/records': typeof RecordsRoute
   '/settlement': typeof SettlementRoute
   '/utilities': typeof UtilitiesRoute
+  '/api/push': typeof ApiPushRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -101,6 +110,7 @@ export interface FileRouteTypes {
     | '/records'
     | '/settlement'
     | '/utilities'
+    | '/api/push'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -111,6 +121,7 @@ export interface FileRouteTypes {
     | '/records'
     | '/settlement'
     | '/utilities'
+    | '/api/push'
   id:
     | '__root__'
     | '/'
@@ -121,6 +132,7 @@ export interface FileRouteTypes {
     | '/records'
     | '/settlement'
     | '/utilities'
+    | '/api/push'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -132,6 +144,7 @@ export interface RootRouteChildren {
   RecordsRoute: typeof RecordsRoute
   SettlementRoute: typeof SettlementRoute
   UtilitiesRoute: typeof UtilitiesRoute
+  ApiPushRoute: typeof ApiPushRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -192,6 +205,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof UtilitiesRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/push': {
+      id: '/api/push'
+      path: '/api/push'
+      fullPath: '/api/push'
+      preLoaderRoute: typeof ApiPushRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -204,6 +224,7 @@ const rootRouteChildren: RootRouteChildren = {
   RecordsRoute: RecordsRoute,
   SettlementRoute: SettlementRoute,
   UtilitiesRoute: UtilitiesRoute,
+  ApiPushRoute: ApiPushRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
