@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
-import { ArrowRight, BadgeCheck, ChevronRight, Undo2 } from "lucide-react";
+import { ArrowRight, BadgeCheck, BellRing, ChevronRight, Undo2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,6 +9,7 @@ import { Avatar, EmptyState, LoadingBlock, Money, PageHeader, ProgressBar, Respo
 import { useDialogs } from "@/components/dialogs";
 import { useLedger } from "@/lib/data";
 import { reversePayment } from "@/lib/db";
+import { nudge, notifyPayment } from "@/lib/notifications";
 import { activePayments, buildBalances, byDateDesc, dayHeading, duesObligations, expenseObligations, shortDate, type Balance, type Obligation, type Payment } from "@/lib/ledger";
 import { formatPaise } from "@/lib/money";
 
@@ -23,7 +24,8 @@ const sum = (xs: Obligation[]) => xs.reduce((s, x) => s + x.amountPaise, 0);
 function SettlePage() {
   const L = useLedger();
   const { pay } = useDialogs();
-  const { expenses, payments, monthDoc, me, nameOf, loading } = L;
+  const { expenses, payments, monthDoc, me, nameOf, loading, roommates } = L;
+  const [nudgingAll, setNudgingAll] = useState(false);
   const [scope, setScope] = useState<"mine" | "all">("mine");
   const [openKey, setOpenKey] = useState<string | null>(null);
 
@@ -40,10 +42,22 @@ function SettlePage() {
   const paid = activePayments(payments).reduce((s, p) => s + p.amountPaise, 0);
   const mineOnly = (b: Balance) => scope === "all" || b.fromId === me?.id || b.toId === me?.id;
   const selected = all.find((b) => keyOf(b) === openKey) ?? null;
+  // People who still owe me anything (all buckets combined), for the one-tap "Nudge everyone" button.
+  const debtors = [...open.filter((b) => b.toId === me?.id).reduce((m, b) => m.set(b.fromId, (m.get(b.fromId) ?? 0) + b.remainingPaise), new Map<string, number>())];
+  const nudgeAll = async () => {
+    if (!me) return;
+    setNudgingAll(true);
+    const results = await Promise.all(debtors.map(([id, amt]) => nudge(me, { debtorId: id, amountPaise: amt, what: "what's pending this month" }, roommates.find((x) => x.id === me.id)?.upiId)));
+    setNudgingAll(false);
+    const sent = results.filter((r) => r === "sent").length;
+    if (sent) toast.success(`Nudged ${sent} ${sent === 1 ? "person" : "people"}`);
+    else if (results.every((r) => r === "already")) toast("Everyone was already nudged today");
+    else toast.error("Couldn't send the nudges. Try again.");
+  };
 
   return (
     <div className="space-y-5">
-      <PageHeader title="Settle Up" subtitle="Who owes whom this month" />
+      <PageHeader title="Settle Up" subtitle="Who owes whom this month" action={debtors.length ? <Button variant="outline" className="h-11" disabled={nudgingAll} onClick={() => void nudgeAll()}><BellRing className="mr-2 size-4" />{nudgingAll ? "Sending…" : `Nudge ${debtors.length === 1 ? nameOf(debtors[0]![0]) : "everyone"}`}</Button> : undefined} />
       <section className="grid grid-cols-2 gap-3" aria-label="Monthly settlement summary">
         <StatCard label="You owe" value={<Money paise={owe} />} tone={owe ? "warning" : "default"} />
         <StatCard label="You are owed" value={<Money paise={owed} />} tone={owed ? "success" : "default"} />
@@ -65,7 +79,17 @@ function SettlePage() {
 }
 
 function Section({ title, hint, items, onOpen, onPay }: { title: string; hint: string; items: Balance[]; onOpen: (k: string) => void; onPay: (b: Balance) => void }) {
-  const { nameOf, me } = useLedger();
+  const { nameOf, me, roommates } = useLedger();
+  const [nudging, setNudging] = useState<string | null>(null);
+  const sendNudge = async (b: Balance) => {
+    if (!me) return;
+    setNudging(keyOf(b));
+    const r = await nudge(me, { debtorId: b.fromId, amountPaise: b.remainingPaise, what: b.kind === "dues" ? "rent, fixed charges and meter bills" : "shared expenses" }, roommates.find((x) => x.id === me.id)?.upiId);
+    setNudging(null);
+    if (r === "sent") toast.success(`Nudged ${nameOf(b.fromId)}`);
+    else if (r === "already") toast(`You already nudged ${nameOf(b.fromId)} today`, { description: "Try again tomorrow. If this is your first nudge, publish the latest firestore.rules." });
+    else toast.error("Couldn't send the nudge. Check your connection and try again.");
+  };
   return (
     <section>
       <h2 className="font-bold">{title}</h2>
@@ -89,6 +113,9 @@ function Section({ title, hint, items, onOpen, onPay }: { title: string; hint: s
                   <Button className="bg-grad-primary h-11 text-white" disabled={b.settled} onClick={() => onPay(b)}>{b.settled ? "All paid" : "Record payment"}</Button>
                   <Button variant="outline" className="h-11" onClick={() => onOpen(keyOf(b))} aria-label="See breakdown">Details<ChevronRight className="ml-1 size-4" /></Button>
                 </div>
+                {b.toId === me?.id && !b.settled ? (
+                  <Button variant="outline" className="mt-2 h-11 w-full" disabled={nudging === keyOf(b)} onClick={() => void sendNudge(b)}><BellRing className="mr-2 size-4" />{nudging === keyOf(b) ? "Sending…" : `Nudge ${nameOf(b.fromId)} to pay`}</Button>
+                ) : null}
               </article>
             );
           })}
@@ -197,7 +224,7 @@ function ReverseDialog({ payment, onClose }: { payment: Payment; onClose: () => 
           <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
           <Button disabled={busy || !reason.trim() || !me} onClick={async () => {
             setBusy(true);
-            try { await reversePayment(payment, reason.trim(), me!.id); toast.success("Payment reversed"); onClose(); } catch (e) { toast.error((e as Error).message); setBusy(false); }
+            try { await reversePayment(payment, reason.trim(), me!.id); notifyPayment({ fromId: payment.fromId, toId: payment.toId, amountPaise: payment.amountPaise }, { id: me!.id, name: me!.name }, nameOf, true); toast.success("Payment reversed"); onClose(); } catch (e) { toast.error((e as Error).message); setBusy(false); }
           }}>Reverse payment</Button>
         </AlertDialogFooter>
       </AlertDialogContent>

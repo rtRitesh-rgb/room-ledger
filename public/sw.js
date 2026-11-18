@@ -5,7 +5,7 @@
  * - Never touches cross-origin requests (Firebase/Firestore, Supabase, etc.)
  *   or non-GET requests, so live data is never served stale.
  */
-const VERSION = "v1";
+const VERSION = "v2";
 const STATIC_CACHE = `room-ledger-static-${VERSION}`;
 const OFFLINE_URL = "/offline.html";
 
@@ -56,4 +56,23 @@ self.addEventListener("fetch", (event) => {
       ),
     );
   }
+});
+
+// Tapping a device alert (nudge, reminder…) focuses the app, or opens it on the right screen.
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const target = (event.notification.data && event.notification.data.url) || "/";
+  event.waitUntil(
+    (async () => {
+      const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      for (const w of wins) {
+        if ("focus" in w) {
+          await w.focus();
+          if ("navigate" in w) { try { await w.navigate(target); } catch (e) { /* cross-origin or blocked */ } }
+          return;
+        }
+      }
+      await self.clients.openWindow(target);
+    })(),
+  );
 });

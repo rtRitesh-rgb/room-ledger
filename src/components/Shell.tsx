@@ -14,6 +14,8 @@ import { db, firebaseConfigured } from "@/lib/firebase";
 import { SessionProvider, useSession } from "@/lib/session";
 import { useTheme, type ThemePref } from "@/lib/theme";
 import { useInstallPrompt } from "@/lib/pwa";
+import { NotificationsProvider } from "@/lib/notify";
+import { NotificationBell } from "./Notifications";
 import type { Roommate } from "@/lib/ledger";
 
 const NAV = [
@@ -159,6 +161,7 @@ function AppFrame({ children }: { children: ReactNode }) {
           ))}
         </nav>
         <div className="mt-auto space-y-3">
+          <NotificationBell full />
           <InstallAppButton full />
           <ThemeToggle full />
           <div className="flex items-center gap-2"><Avatar name={me?.name ?? "?"} /><span className="flex-1 truncate text-sm font-semibold">{me?.name}</span>
@@ -168,7 +171,7 @@ function AppFrame({ children }: { children: ReactNode }) {
 
       <header className="sticky top-0 z-30 flex items-center justify-between border-b border-border bg-background/90 px-4 py-2 backdrop-blur md:hidden">
         <Brand />
-        <div className="flex items-center gap-2"><InstallAppButton /><ThemeToggle /></div>
+        <div className="flex items-center gap-2"><NotificationBell /><InstallAppButton /><ThemeToggle /></div>
       </header>
 
       <main className="mx-auto w-full max-w-5xl px-4 pb-28 pt-4 md:px-8 md:pb-10 md:pt-8">
@@ -202,9 +205,11 @@ function Inner({ children }: { children: ReactNode }) {
   if (status === "unclaimed") return <ClaimScreen />;
   return (
     <LedgerProvider>
-      <DialogsProvider>
-        <AppFrame>{children}</AppFrame>
-      </DialogsProvider>
+      <NotificationsProvider>
+        <DialogsProvider>
+          <AppFrame>{children}</AppFrame>
+        </DialogsProvider>
+      </NotificationsProvider>
     </LedgerProvider>
   );
 }

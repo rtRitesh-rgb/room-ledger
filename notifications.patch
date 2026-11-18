@@ -1,0 +1,762 @@
+diff --git a/firestore.rules b/firestore.rules
+index e3a4e5c..9c4c034 100644
+--- a/firestore.rules
++++ b/firestore.rules
+@@ -93,6 +93,23 @@ service cloud.firestore {
+     }
+     match /months/{id} { allow read: if isMember(); allow write: if isMember(); }
+ 
++    // NOTIFICATIONS (nudges, month-end reminders, activity). Only the recipient can read, mark read, or delete them.
++    // Anyone can send one, but only as themselves. Nudges use a per-day id, so a pair can only be nudged once a day.
++    match /notifications/{id} {
++      allow read: if isMember() && resource.data.toId == myId();
++      allow create: if isMember()
++        && request.resource.data.fromId == myId()
++        && request.resource.data.toId is string
++        && request.resource.data.title is string && request.resource.data.title.size() <= 200
++        && request.resource.data.body is string && request.resource.data.body.size() <= 600
++        && request.resource.data.readAtMs == null
++        && (request.resource.data.type != 'nudge'
++            || id.matches('nudge_' + myId() + '_' + request.resource.data.toId + '_.*'));
++      allow update: if isMember() && resource.data.toId == myId()
++        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readAtMs']);
++      allow delete: if isMember() && resource.data.toId == myId();
++    }
++
+     // Append-only audit trail.
+     match /audit/{id} {
+       allow read: if isMember() && (isAdmin() || resource.data.actorId == myId());
+diff --git a/public/sw.js b/public/sw.js
+index f01e4bd..0439b74 100644
+--- a/public/sw.js
++++ b/public/sw.js
+@@ -5,7 +5,7 @@
+  * - Never touches cross-origin requests (Firebase/Firestore, Supabase, etc.)
+  *   or non-GET requests, so live data is never served stale.
+  */
+-const VERSION = "v1";
++const VERSION = "v2";
+ const STATIC_CACHE = `room-ledger-static-${VERSION}`;
+ const OFFLINE_URL = "/offline.html";
+ 
+@@ -57,3 +57,22 @@ self.addEventListener("fetch", (event) => {
+     );
+   }
+ });
++
++// Tapping a device alert (nudge, reminder…) focuses the app, or opens it on the right screen.
++self.addEventListener("notificationclick", (event) => {
++  event.notification.close();
++  const target = (event.notification.data && event.notification.data.url) || "/";
++  event.waitUntil(
++    (async () => {
++      const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
++      for (const w of wins) {
++        if ("focus" in w) {
++          await w.focus();
++          if ("navigate" in w) { try { await w.navigate(target); } catch (e) { /* cross-origin or blocked */ } }
++          return;
++        }
++      }
++      await self.clients.openWindow(target);
++    })(),
++  );
++});
+diff --git a/src/components/ExpenseForm.tsx b/src/components/ExpenseForm.tsx
+index f044dcd..46df61b 100644
+--- a/src/components/ExpenseForm.tsx
++++ b/src/components/ExpenseForm.tsx
+@@ -14,6 +14,8 @@ import { AmountInput } from "./AmountInput";
+ import { evalAmount, resolveAmountText } from "@/lib/calc";
+ import { useLedger } from "@/lib/data";
+ import { deleteExpense, saveExpense } from "@/lib/db";
++import { notifyExpenseSaved } from "@/lib/notifications";
++import { friendlyError } from "@/lib/errors";
+ import { uploadReceipt } from "@/lib/receipts";
+ import { computeSplit, type SplitMode } from "@/lib/money";
+ import { currentMonth, todayISO, type Expense } from "@/lib/ledger";
+@@ -79,10 +81,11 @@ export function ExpenseForm({ expense, onClose }: { expense?: Expense; onClose:
+         me.id,
+         expense,
+       );
++      notifyExpenseSaved({ name: name.trim(), amountPaise: total, shares: split.shares, isPersonal: mode === "personal" }, { id: me.id, name: me.name }, !!expense);
+       toast.success(expense ? "Expense updated" : "Expense saved");
+       onClose();
+     } catch (e) {
+-      toast.error((e as Error).message || "Couldn't save. Nothing was changed.");
++      toast.error(friendlyError(e));
+     } finally {
+       setBusy(false);
+     }
+diff --git a/b/src/components/Notifications.tsx b/src/components/Notifications.tsx
+new file mode 100644
+index 0000000..60963e0
+--- /dev/null
++++ b/src/components/Notifications.tsx
+@@ -0,0 +1,123 @@
++import { useState } from "react";
++import { useNavigate } from "@tanstack/react-router";
++import { Bell, BellRing, CalendarClock, CheckCheck, HandCoins, Megaphone, Receipt, Trash2, Undo2, UserCog, Wallet, Zap, type LucideIcon } from "lucide-react";
++import { toast } from "sonner";
++import { Button } from "@/components/ui/button";
++import { ResponsiveSheet, cx } from "./kit";
++import { useNotifications } from "@/lib/notify";
++import type { AppNotification, NotifType } from "@/lib/notifications";
++
++const ICONS: Record<NotifType, { icon: LucideIcon; tone: string }> = {
++  nudge: { icon: Megaphone, tone: "bg-warning/20 text-warning-foreground dark:text-warning" },
++  month_end: { icon: CalendarClock, tone: "bg-warning/20 text-warning-foreground dark:text-warning" },
++  new_month: { icon: CalendarClock, tone: "bg-primary/15 text-primary" },
++  expense: { icon: Receipt, tone: "bg-primary/15 text-primary" },
++  payment: { icon: HandCoins, tone: "bg-success/20 text-success" },
++  reversal: { icon: Undo2, tone: "bg-destructive/15 text-destructive" },
++  bill: { icon: Zap, tone: "bg-primary/15 text-primary" },
++  wallet: { icon: Wallet, tone: "bg-destructive/15 text-destructive" },
++  manager: { icon: UserCog, tone: "bg-primary/15 text-primary" },
++};
++
++function ago(ms: number): string {
++  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
++  if (s < 60) return "just now";
++  const m = Math.round(s / 60);
++  if (m < 60) return `${m}m ago`;
++  const h = Math.round(m / 60);
++  if (h < 24) return `${h}h ago`;
++  const d = Math.round(h / 24);
++  return d < 7 ? `${d}d ago` : new Date(ms).toLocaleDateString("en-IN", { day: "numeric", month: "short" });
++}
++
++/** Bell button for the header / sidebar. Opens the notification centre. */
++export function NotificationBell({ full }: { full?: boolean }) {
++  const { unread } = useNotifications();
++  const [open, setOpen] = useState(false);
++  const badge = unread > 0 ? <span className="num absolute -right-0.5 -top-0.5 grid h-5 min-w-5 place-items-center rounded-full bg-destructive px-1 text-[10px] font-bold text-white ring-2 ring-background">{unread > 9 ? "9+" : unread}</span> : null;
++  return (
++    <>
++      {full ? (
++        <Button type="button" variant="outline" onClick={() => setOpen(true)} className="relative h-11 w-full justify-start gap-2">
++          {unread ? <BellRing className="size-4" /> : <Bell className="size-4" />}Notifications
++          {unread > 0 ? <span className="num ml-auto grid h-5 min-w-5 place-items-center rounded-full bg-destructive px-1.5 text-[11px] font-bold text-white">{unread > 9 ? "9+" : unread}</span> : null}
++        </Button>
++      ) : (
++        <button type="button" onClick={() => setOpen(true)} aria-label={unread ? `Notifications, ${unread} unread` : "Notifications"} className="press relative grid size-11 place-items-center rounded-full border border-border bg-card hover:bg-muted">
++          {unread ? <BellRing className="size-4" /> : <Bell className="size-4" />}{badge}
++        </button>
++      )}
++      {open ? <NotificationSheet onClose={() => setOpen(false)} /> : null}
++    </>
++  );
++}
++
++function NotificationSheet({ onClose }: { onClose: () => void }) {
++  const { items, unread, loaded, permission, enableAlerts, read, readAll, remove, clearRead } = useNotifications();
++  const navigate = useNavigate();
++  const hasRead = items.some((n) => n.readAtMs);
++
++  const go = (n: AppNotification) => {
++    if (!n.readAtMs) read(n.id);
++    onClose();
++    const u = new URL(n.link || "/", "http://x");
++    void navigate({ to: u.pathname as never, search: Object.fromEntries(u.searchParams) as never });
++  };
++
++  const turnOn = async () => {
++    const r = await enableAlerts();
++    if (r === "granted") toast.success("Alerts are on for this device");
++    else if (r === "denied") toast.error("Alerts are blocked. Allow notifications for this site in your browser settings.");
++    else toast("Alerts aren't available here", { description: "On iPhone, first tap Share → Add to Home Screen, then open the installed app." });
++  };
++
++  return (
++    <ResponsiveSheet open onOpenChange={(o) => !o && onClose()} title="Notifications" description={unread ? `${unread} unread` : "You're all caught up"}>
++      <div className="space-y-3 pb-2">
++        {permission === "default" ? (
++          <button type="button" onClick={() => void turnOn()} className="press flex w-full items-center gap-3 rounded-xl bg-accent p-3 text-left text-accent-foreground">
++            <BellRing className="size-5 shrink-0" aria-hidden />
++            <span className="text-sm"><b>Turn on device alerts</b><span className="block text-xs opacity-80">Get a pop-up when someone nudges you or a bill is added while the app is open or in the background.</span></span>
++          </button>
++        ) : permission === "denied" ? (
++          <p className="rounded-xl bg-muted p-3 text-xs text-muted-foreground">Device alerts are blocked for this site. You'll still see everything here.</p>
++        ) : null}
++
++        {items.length > 0 ? (
++          <div className="flex gap-2">
++            <Button variant="outline" size="sm" className="h-9 flex-1" disabled={!unread} onClick={readAll}><CheckCheck className="mr-1.5 size-4" />Mark all read</Button>
++            <Button variant="ghost" size="sm" className="h-9" disabled={!hasRead} onClick={clearRead}><Trash2 className="mr-1.5 size-4" />Clear read</Button>
++          </div>
++        ) : null}
++
++        {!loaded ? <p className="py-8 text-center text-sm text-muted-foreground">Loading…</p> : items.length === 0 ? (
++          <div className="grid place-items-center gap-2 py-10 text-center text-muted-foreground">
++            <Bell className="size-8" aria-hidden />
++            <p className="text-sm font-semibold text-foreground">Nothing yet</p>
++            <p className="max-w-xs text-xs">Nudges from roommates, month-end reminders and new bills or payments will show up here.</p>
++          </div>
++        ) : (
++          <ul className="divide-y divide-border rounded-xl border border-border">
++            {items.map((n) => {
++              const { icon: Icon, tone } = ICONS[n.type] ?? ICONS.expense;
++              return (
++                <li key={n.id} className={cx("flex items-start gap-3 p-3", !n.readAtMs && "bg-primary/5")}>
++                  <button type="button" onClick={() => go(n)} className="press flex min-w-0 flex-1 items-start gap-3 text-left">
++                    <span className={cx("mt-0.5 grid size-9 shrink-0 place-items-center rounded-full", tone)}><Icon className="size-4" aria-hidden /></span>
++                    <span className="min-w-0 flex-1">
++                      <span className={cx("block text-sm", !n.readAtMs ? "font-bold" : "font-semibold")}>{n.title}</span>
++                      <span className="mt-0.5 block text-xs text-muted-foreground">{n.body}</span>
++                      <span className="mt-1 block text-[11px] text-muted-foreground">{ago(n.createdAtMs)}</span>
++                    </span>
++                    {!n.readAtMs ? <span className="mt-2 size-2 shrink-0 rounded-full bg-primary" aria-label="Unread" /> : null}
++                  </button>
++                  <button type="button" aria-label="Dismiss notification" onClick={() => remove(n.id)} className="press grid size-9 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-muted"><Trash2 className="size-4" /></button>
++                </li>
++              );
++            })}
++          </ul>
++        )}
++      </div>
++    </ResponsiveSheet>
++  );
++}
+diff --git a/src/components/PaymentDialog.tsx b/src/components/PaymentDialog.tsx
+index 9c08fd8..3002736 100644
+--- a/src/components/PaymentDialog.tsx
++++ b/src/components/PaymentDialog.tsx
+@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
+ import { Avatar, Money, NativeSelect, ProgressBar, ResponsiveSheet } from "./kit";
+ import { useLedger } from "@/lib/data";
+ import { recordPayment } from "@/lib/db";
++import { notifyPayment } from "@/lib/notifications";
+ import { uuid } from "@/lib/uuid";
+ import { formatPaise, paiseToRupeesString } from "@/lib/money";
+ import { evalAmount } from "@/lib/calc";
+@@ -33,6 +34,7 @@ export function PaymentDialog({ balance, onClose }: { balance: Balance; onClose:
+     setBusy(true);
+     try {
+       await recordPayment(requestId, { month, fromId: balance.fromId, toId: balance.toId, amountPaise: amount, kind: balance.kind, date, method, reference: reference.trim(), note: note.trim() }, me.id);
++      notifyPayment({ fromId: balance.fromId, toId: balance.toId, amountPaise: amount }, { id: me.id, name: me.name }, nameOf, false);
+       toast.success(`Recorded ${formatPaise(amount)} from ${nameOf(balance.fromId)} to ${nameOf(balance.toId)}`);
+       onClose();
+     } catch (e) {
+diff --git a/src/components/Shell.tsx b/src/components/Shell.tsx
+index 3e020c8..4928e2b 100644
+--- a/src/components/Shell.tsx
++++ b/src/components/Shell.tsx
+@@ -14,6 +14,8 @@ import { db, firebaseConfigured } from "@/lib/firebase";
+ import { SessionProvider, useSession } from "@/lib/session";
+ import { useTheme, type ThemePref } from "@/lib/theme";
+ import { useInstallPrompt } from "@/lib/pwa";
++import { NotificationsProvider } from "@/lib/notify";
++import { NotificationBell } from "./Notifications";
+ import type { Roommate } from "@/lib/ledger";
+ 
+ const NAV = [
+@@ -159,6 +161,7 @@ function AppFrame({ children }: { children: ReactNode }) {
+           ))}
+         </nav>
+         <div className="mt-auto space-y-3">
++          <NotificationBell full />
+           <InstallAppButton full />
+           <ThemeToggle full />
+           <div className="flex items-center gap-2"><Avatar name={me?.name ?? "?"} /><span className="flex-1 truncate text-sm font-semibold">{me?.name}</span>
+@@ -168,7 +171,7 @@ function AppFrame({ children }: { children: ReactNode }) {
+ 
+       <header className="sticky top-0 z-30 flex items-center justify-between border-b border-border bg-background/90 px-4 py-2 backdrop-blur md:hidden">
+         <Brand />
+-        <div className="flex items-center gap-2"><InstallAppButton /><ThemeToggle /></div>
++        <div className="flex items-center gap-2"><NotificationBell /><InstallAppButton /><ThemeToggle /></div>
+       </header>
+ 
+       <main className="mx-auto w-full max-w-5xl px-4 pb-28 pt-4 md:px-8 md:pb-10 md:pt-8">
+@@ -202,9 +205,11 @@ function Inner({ children }: { children: ReactNode }) {
+   if (status === "unclaimed") return <ClaimScreen />;
+   return (
+     <LedgerProvider>
+-      <DialogsProvider>
+-        <AppFrame>{children}</AppFrame>
+-      </DialogsProvider>
++      <NotificationsProvider>
++        <DialogsProvider>
++          <AppFrame>{children}</AppFrame>
++        </DialogsProvider>
++      </NotificationsProvider>
+     </LedgerProvider>
+   );
+ }
+diff --git a/src/components/UtilityDialog.tsx b/src/components/UtilityDialog.tsx
+index a2afa66..97c19d9 100644
+--- a/src/components/UtilityDialog.tsx
++++ b/src/components/UtilityDialog.tsx
+@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
+ import { Money, ResponsiveSheet, cx } from "./kit";
+ import { useLedger } from "@/lib/data";
+ import { addRate, fetchLastReading, saveUtilityBill } from "@/lib/db";
++import { notifyBill } from "@/lib/notifications";
+ import { formatMilli, formatPaise, paiseToRupeesString, parseMilli, parseRupees, splitEqual } from "@/lib/money";
+ import { Checkbox } from "@/components/ui/checkbox";
+ import { currentMonth, previewBill, resolveRate, type UtilityKind } from "@/lib/ledger";
+@@ -62,6 +63,7 @@ export function UtilityDialog({ onClose }: { onClose: () => void }) {
+     setBusy(true);
+     try {
+       await saveUtilityBill({ kind, startMilli: s, endMilli: e, unitsMilli: prev.unitsMilli, ratePaise: usedRate, amountPaise: prev.amountPaise, readingDate: date, payerId, shares }, me.id);
++      notifyBill({ kind, amountPaise: prev.amountPaise, shares }, { id: me.id, name: me.name });
+       if (saveRate && rateChanged && isAdmin) {
+         try { await addRate({ kind, ratePaise: usedRate, effectiveMonth: date.slice(0, 7), note: "Set while recording a reading" }, me.id); }
+         catch { toast.error("Bill saved, but the new default rate couldn't be saved. Set it in Household → Utility rates."); onClose(); return; }
+diff --git a/b/src/lib/errors.ts b/src/lib/errors.ts
+new file mode 100644
+index 0000000..274f731
+--- /dev/null
++++ b/src/lib/errors.ts
+@@ -0,0 +1,8 @@
++/** Turns raw Firebase errors into something a person can act on. */
++export function friendlyError(e: unknown): string {
++  const err = e as { code?: string; message?: string };
++  if (err?.code === "permission-denied" || /missing or insufficient permissions/i.test(err?.message ?? ""))
++    return "Firestore refused this save. The security rules published in your Firebase project are out of date. Publish the latest firestore.rules (Firebase console → Firestore → Rules → Publish), then try again.";
++  if (err?.code === "unavailable" || err?.code === "deadline-exceeded") return "You seem to be offline. Check your connection and try again.";
++  return err?.message || "Couldn't save.";
++}
+diff --git a/b/src/lib/notifications.ts b/src/lib/notifications.ts
+new file mode 100644
+index 0000000..c85424e
+--- /dev/null
++++ b/src/lib/notifications.ts
+@@ -0,0 +1,139 @@
++import { collection, deleteDoc, doc, setDoc, updateDoc, writeBatch } from "firebase/firestore";
++import { db } from "./firebase";
++import { formatPaise, type Paise } from "./money";
++
++/**
++ * In-app notifications, stored in Firestore (`notifications`). Only the recipient can read them
++ * (see firestore.rules). Every send is best-effort: a notification failing must never break the
++ * expense / payment / bill that triggered it.
++ */
++
++export type NotifType = "nudge" | "month_end" | "new_month" | "expense" | "payment" | "reversal" | "bill" | "wallet" | "manager";
++
++export type AppNotification = {
++  id: string;
++  toId: string;
++  fromId: string;
++  type: NotifType;
++  title: string;
++  body: string;
++  /** In-app route to open when tapped. */
++  link: string;
++  amountPaise: Paise | null;
++  createdAtMs: number;
++  readAtMs: number | null;
++};
++
++type NewNotification = Omit<AppNotification, "id" | "createdAtMs" | "readAtMs" | "amountPaise"> & { amountPaise?: Paise | null };
++
++const COL = "notifications";
++const now = () => Date.now();
++
++export const dayKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
++
++/** Writes one notification. With an explicit `id` it can only ever be created once (a rewrite is refused by the rules). */
++export async function sendNotification(n: NewNotification, id?: string): Promise<void> {
++  const ref = id ? doc(db, COL, id) : doc(collection(db, COL));
++  await setDoc(ref, { ...n, amountPaise: n.amountPaise ?? null, createdAtMs: now(), readAtMs: null });
++}
++
++/** Fire-and-forget version used after saves: never throws. */
++export function sendQuietly(list: NewNotification[]): void {
++  for (const n of list) void sendNotification(n).catch(() => {});
++}
++
++export const markRead = (id: string) => updateDoc(doc(db, COL, id), { readAtMs: now() });
++export const removeNotification = (id: string) => deleteDoc(doc(db, COL, id));
++
++export async function markAllRead(ids: string[]) {
++  for (let i = 0; i < ids.length; i += 400) {
++    const batch = writeBatch(db);
++    const t = now();
++    for (const id of ids.slice(i, i + 400)) batch.update(doc(db, COL, id), { readAtMs: t });
++    await batch.commit();
++  }
++}
++
++export async function removeMany(ids: string[]) {
++  for (let i = 0; i < ids.length; i += 400) {
++    const batch = writeBatch(db);
++    for (const id of ids.slice(i, i + 400)) batch.delete(doc(db, COL, id));
++    await batch.commit();
++  }
++}
++
++// ───────────── Nudges ─────────────
++
++export type NudgeTarget = { debtorId: string; amountPaise: Paise; what: string };
++
++const NUDGED_KEY = "room-ledger-nudged";
++const readNudged = (): Record<string, true> => { try { return JSON.parse(localStorage.getItem(NUDGED_KEY) ?? "{}"); } catch { return {}; } };
++
++export type NudgeResult = "sent" | "already" | "failed";
++
++/**
++ * Sends one friendly reminder. The id is `nudge_<me>_<them>_<date>`, so each person can be nudged at most once per day
++ * (a second attempt is refused by the database, which is what stops nudge-spam).
++ */
++export async function nudge(me: { id: string; name: string }, t: NudgeTarget, upiId?: string): Promise<NudgeResult> {
++  const id = `nudge_${me.id}_${t.debtorId}_${dayKey()}`;
++  const seen = readNudged();
++  if (seen[id]) return "already";
++  try {
++    await sendNotification({
++      toId: t.debtorId, fromId: me.id, type: "nudge", link: "/settlement",
++      title: `${me.name} is waiting on ${formatPaise(t.amountPaise)}`,
++      body: `Friendly reminder to settle ${t.what}.${upiId ? ` Pay on UPI: ${upiId}` : ""}`,
++      amountPaise: t.amountPaise,
++    }, id);
++    try { localStorage.setItem(NUDGED_KEY, JSON.stringify({ ...Object.fromEntries(Object.keys(seen).slice(-200).map((k) => [k, true])), [id]: true })); } catch { /* storage full or blocked */ }
++    return "sent";
++  } catch (e) {
++    // A refusal on a deterministic id almost always means today's nudge already exists.
++    return (e as { code?: string }).code === "permission-denied" ? "already" : "failed";
++  }
++}
++
++// ───────────── Activity notifications (best effort, after the main save succeeds) ─────────────
++
++type Names = (id: string) => string;
++
++export function notifyExpenseSaved(
++  e: { name: string; amountPaise: Paise; shares: Record<string, Paise>; isPersonal: boolean },
++  actor: { id: string; name: string }, edited: boolean,
++) {
++  if (e.isPersonal) return; // personal expenses are private: never announce them
++  sendQuietly(Object.entries(e.shares).filter(([id, share]) => id !== actor.id && share > 0).map(([id, share]) => ({
++    toId: id, fromId: actor.id, type: "expense" as const, link: "/expenses",
++    title: `${actor.name} ${edited ? "updated" : "added"} “${e.name}”`,
++    body: `${formatPaise(e.amountPaise)} in total · your share is ${formatPaise(share)}`,
++    amountPaise: share,
++  })));
++}
++
++export function notifyPayment(
++  p: { fromId: string; toId: string; amountPaise: Paise }, actor: { id: string; name: string }, nameOf: Names, reversed: boolean,
++) {
++  const others = [p.fromId, p.toId].filter((id) => id !== actor.id);
++  sendQuietly(others.map((id) => ({
++    toId: id, fromId: actor.id, type: reversed ? "reversal" as const : "payment" as const, link: "/settlement",
++    title: reversed ? `Payment of ${formatPaise(p.amountPaise)} was reversed` : p.toId === id ? `${nameOf(p.fromId)} paid you ${formatPaise(p.amountPaise)}` : `${formatPaise(p.amountPaise)} payment to ${nameOf(p.toId)} recorded`,
++    body: reversed ? `${actor.name} reversed the payment between ${nameOf(p.fromId)} and ${nameOf(p.toId)}.` : `Recorded by ${actor.name}.`,
++    amountPaise: p.amountPaise,
++  })));
++}
++
++export function notifyBill(
++  b: { kind: string; amountPaise: Paise; shares: Record<string, Paise> }, actor: { id: string; name: string },
++) {
++  sendQuietly(Object.entries(b.shares).filter(([id, share]) => id !== actor.id && share > 0).map(([id, share]) => ({
++    toId: id, fromId: actor.id, type: "bill" as const, link: "/expenses",
++    title: `${b.kind === "electricity" ? "Electricity" : "Gas"} bill added: ${formatPaise(b.amountPaise)}`,
++    body: `Your share is ${formatPaise(share)}.`, amountPaise: share,
++  })));
++}
++
++export function notifyManager(managerId: string, monthText: string, actor: { id: string; name: string }) {
++  if (managerId === actor.id) return;
++  sendQuietly([{ toId: managerId, fromId: actor.id, type: "manager", link: "/household?tab=manager", title: `You're the manager for ${monthText}`, body: `${actor.name} picked you to collect rent and fixed charges.` }]);
++}
+diff --git a/b/src/lib/notify.tsx b/src/lib/notify.tsx
+new file mode 100644
+index 0000000..a333e0f
+--- /dev/null
++++ b/src/lib/notify.tsx
+@@ -0,0 +1,170 @@
++import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
++import { collection, onSnapshot, query, where } from "firebase/firestore";
++import { db } from "./firebase";
++import { C } from "./db";
++import { useLedger } from "./data";
++import {
++  buildBalances, currentMonth, duesObligations, expenseObligations, monthLabel, vaultSummary,
++} from "./ledger";
++import { formatPaise } from "./money";
++import { markAllRead, markRead, removeMany, removeNotification, sendNotification, type AppNotification } from "./notifications";
++
++type Permission = "unsupported" | "default" | "granted" | "denied";
++
++type NotifyValue = {
++  items: AppNotification[];
++  unread: number;
++  loaded: boolean;
++  permission: Permission;
++  enableAlerts: () => Promise<Permission>;
++  read: (id: string) => void;
++  readAll: () => void;
++  remove: (id: string) => void;
++  clearRead: () => void;
++};
++
++const Ctx = createContext<NotifyValue>({
++  items: [], unread: 0, loaded: false, permission: "unsupported",
++  enableAlerts: async () => "unsupported", read: () => {}, readAll: () => {}, remove: () => {}, clearRead: () => {},
++});
++
++const MADE_KEY = "room-ledger-notif-made"; // ids of reminders this device already created (so deleted ones never come back)
++const SHOWN_KEY = "room-ledger-notif-shown"; // ids already shown as a device alert
++const THIRTY_DAYS = 30 * 24 * 3600 * 1000;
++
++const loadSet = (key: string): Set<string> => { try { return new Set(JSON.parse(localStorage.getItem(key) ?? "[]") as string[]); } catch { return new Set(); } };
++const saveSet = (key: string, s: Set<string>) => { try { localStorage.setItem(key, JSON.stringify([...s].slice(-400))); } catch { /* ignore */ } };
++
++const getPermission = (): Permission => (typeof window === "undefined" || !("Notification" in window) ? "unsupported" : (Notification.permission as Permission));
++
++/** Shows an OS-level alert. Uses the service worker when available (needed on Android Chrome / installed PWAs). */
++async function showDeviceAlert(n: AppNotification) {
++  const opts: NotificationOptions = { body: n.body, icon: "/icons/icon-192.png", badge: "/icons/favicon-32.png", tag: n.id, data: { url: n.link } };
++  try {
++    const reg = "serviceWorker" in navigator ? await navigator.serviceWorker.getRegistration() : undefined;
++    if (reg) await reg.showNotification(n.title, opts);
++    else new Notification(n.title, opts);
++  } catch { /* some browsers refuse; the in-app bell still works */ }
++}
++
++export function NotificationsProvider({ children }: { children: ReactNode }) {
++  const L = useLedger();
++  const { me, month, loading, expenses, payments, monthDoc, allocations, wallet, settings } = L;
++  const meId = me?.id ?? null;
++  const [items, setItems] = useState<AppNotification[]>([]);
++  const [loaded, setLoaded] = useState(false);
++  const [permission, setPermission] = useState<Permission>("unsupported");
++  const firstLoad = useRef(true);
++
++  useEffect(() => setPermission(getPermission()), []);
++
++  // 1) Live feed: only my own notifications (the rules enforce the same).
++  useEffect(() => {
++    if (!meId) return;
++    firstLoad.current = true;
++    setLoaded(false);
++    return onSnapshot(
++      query(collection(db, "notifications"), where("toId", "==", meId)),
++      (snap) => {
++        const next = snap.docs.map((d) => ({ ...d.data(), id: d.id }) as AppNotification).sort((a, b) => b.createdAtMs - a.createdAtMs);
++        setItems(next);
++        setLoaded(true);
++      },
++      () => setLoaded(true), // rules not published yet → just show an empty bell instead of breaking the app
++    );
++  }, [meId]);
++
++  const unread = useMemo(() => items.filter((n) => !n.readAtMs).length, [items]);
++
++  // 2) Housekeeping: drop read notifications older than 30 days.
++  const pruned = useRef(false);
++  useEffect(() => {
++    if (!loaded || pruned.current) return;
++    pruned.current = true;
++    const old = items.filter((n) => n.readAtMs && Date.now() - n.createdAtMs > THIRTY_DAYS).slice(0, 100).map((n) => n.id);
++    if (old.length) void removeMany(old).catch(() => {});
++  }, [loaded, items]);
++
++  // 3) Automatic reminders, generated on this device for me, once each (deterministic ids).
++  useEffect(() => {
++    if (!meId || !loaded || loading || !me) return;
++    const made = loadSet(MADE_KEY);
++    const have = new Set(items.map((n) => n.id));
++    const make = (id: string, n: Parameters<typeof sendNotification>[0]) => {
++      if (have.has(id) || made.has(id)) return;
++      made.add(id); saveSet(MADE_KEY, made);
++      void sendNotification(n, id).catch(() => { made.delete(id); saveSet(MADE_KEY, made); });
++    };
++    const base = { toId: meId, fromId: meId } as const;
++    const cm = currentMonth();
++    const today = new Date();
++    const lastDay = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
++    const daysLeft = lastDay - today.getDate();
++
++    // New month: nudge to review the private wallet (it silently inherits last month's amount).
++    const vault = vaultSummary(meId, cm, allocations, wallet, settings.carryForward);
++    make(`newmonth_${cm}_${meId}`, {
++      ...base, type: "new_month", link: "/household", title: `Welcome to ${monthLabel(cm)}`,
++      body: vault.allocation ? `Your wallet is ${formatPaise(vault.allocation)} (same as last month). Update it if your budget changed.` : "Set your wallet amount for this month to get a daily spending limit.",
++    });
++
++    // Private wallet warnings (only I can see these).
++    if (vault.status === "over") make(`wallet_over_${cm}_${meId}`, { ...base, type: "wallet", link: "/household", title: "You're over your wallet", body: `You're ${formatPaise(-vault.remaining)} over for ${monthLabel(cm)}. Top it up or slow down on spending.` });
++    else if (vault.status === "low") make(`wallet_low_${cm}_${meId}`, { ...base, type: "wallet", link: "/household", title: "Wallet running low", body: `Only ${formatPaise(vault.remaining)} left for ${monthLabel(cm)}.` });
++
++    // Month-end settle-up reminders: 3 days out and on the last day. Needs the current month's data on screen.
++    if (daysLeft <= 3 && month === cm) {
++      const open = [
++        ...buildBalances(expenseObligations(expenses), payments, "general"),
++        ...buildBalances(duesObligations(expenses, monthDoc?.fixed ?? null, monthDoc?.managerId ?? null), payments, "dues"),
++      ].filter((b) => !b.settled);
++      const owe = open.filter((b) => b.fromId === meId).reduce((s, b) => s + b.remainingPaise, 0);
++      const owed = open.filter((b) => b.toId === meId).reduce((s, b) => s + b.remainingPaise, 0);
++      if (owe > 0 || owed > 0) {
++        const parts = [owe > 0 ? `You still owe ${formatPaise(owe)}.` : "", owed > 0 ? `${formatPaise(owed)} is still to collect.` : ""].filter(Boolean).join(" ");
++        make(`monthend_${cm}_${daysLeft === 0 ? "last" : "soon"}_${meId}`, {
++          ...base, type: "month_end", link: "/settlement",
++          title: daysLeft === 0 ? "Last day of the month: settle up" : `${daysLeft} day${daysLeft === 1 ? "" : "s"} left this month`,
++          body: `${parts} Clear balances before the month closes.`, amountPaise: owe || owed,
++        });
++      }
++    }
++  }, [meId, me, loaded, loading, items, month, expenses, payments, monthDoc, allocations, wallet, settings.carryForward]);
++
++  // 4) Device alerts + app-icon badge for anything new and unread.
++  useEffect(() => {
++    if (!loaded) return;
++    try { void (navigator as Navigator & { setAppBadge?: (n: number) => Promise<void> }).setAppBadge?.(unread); } catch { /* unsupported */ }
++    if (getPermission() !== "granted") return;
++    const shown = loadSet(SHOWN_KEY);
++    const fresh = items.filter((n) => !n.readAtMs && !shown.has(n.id));
++    if (!fresh.length) return;
++    for (const n of fresh) shown.add(n.id);
++    saveSet(SHOWN_KEY, shown);
++    if (fresh.length > 3 && firstLoad.current) {
++      void showDeviceAlert({ ...fresh[0]!, id: "summary", title: `${fresh.length} new notifications`, body: "Open Room Ledger to see them.", link: "/" });
++    } else {
++      fresh.slice(0, 3).forEach((n) => void showDeviceAlert(n));
++    }
++    firstLoad.current = false;
++  }, [items, loaded, unread]);
++
++  const enableAlerts = useCallback(async (): Promise<Permission> => {
++    if (getPermission() === "unsupported") return "unsupported";
++    const res = (await Notification.requestPermission()) as Permission;
++    setPermission(res);
++    return res;
++  }, []);
++
++  const value = useMemo<NotifyValue>(() => ({
++    items, unread, loaded, permission, enableAlerts,
++    read: (id) => void markRead(id).catch(() => {}),
++    readAll: () => void markAllRead(items.filter((n) => !n.readAtMs).map((n) => n.id)).catch(() => {}),
++    remove: (id) => void removeNotification(id).catch(() => {}),
++    clearRead: () => void removeMany(items.filter((n) => n.readAtMs).map((n) => n.id)).catch(() => {}),
++  }), [items, unread, loaded, permission, enableAlerts]);
++
++  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
++}
++
++export const useNotifications = () => useContext(Ctx);
+diff --git a/src/routes/household.tsx b/src/routes/household.tsx
+index 200e0fd..54b9651 100644
+--- a/src/routes/household.tsx
++++ b/src/routes/household.tsx
+@@ -14,6 +14,8 @@ import { DailyLimitCard } from "@/components/DailyLimit";
+ import { ICON_NAMES } from "@/components/category-icons";
+ import { ThemeToggle } from "@/components/Shell";
+ import { useLedger } from "@/lib/data";
++import { notifyManager } from "@/lib/notifications";
++import { friendlyError } from "@/lib/errors";
+ import { addRate, saveCategory, saveFixedCharge, saveSettings, setAllocation, setManager, updateMyUpi } from "@/lib/db";
+ import { evalAmount } from "@/lib/calc";
+ import { useSession } from "@/lib/session";
+@@ -50,7 +52,7 @@ function HouseholdPage() {
+ }
+ 
+ const AdminNote = () => <p className="mb-3 rounded-xl bg-muted p-3 text-xs text-muted-foreground">Only household admins can change this. You're viewing it read-only.</p>;
+-const run = async (fn: () => Promise<unknown>, ok: string) => { try { await fn(); toast.success(ok); return true; } catch (e) { toast.error((e as Error).message || "Couldn't save."); return false; } };
++const run = async (fn: () => Promise<unknown>, ok: string) => { try { await fn(); toast.success(ok); return true; } catch (e) { toast.error(friendlyError(e)); return false; } };
+ 
+ // ───────── My wallet (private: nobody else can see or change it) ─────────
+ function WalletTab() {
+@@ -123,7 +125,7 @@ function ManagerTab() {
+     <section className="panel space-y-4 p-4">
+       <div>
+         <Label>Manager for {monthLabel(month)}</Label>
+-        <NativeSelect className="mt-1.5" aria-label="Manager" value={monthDoc?.managerId ?? ""} onChange={(v) => { if (v) void run(() => setManager(month, v, me!.id), "Manager updated"); }} options={[{ value: "", label: "Choose the manager" }, ...roommates.map((r) => ({ value: r.id, label: r.name }))]} />
++        <NativeSelect className="mt-1.5" aria-label="Manager" value={monthDoc?.managerId ?? ""} onChange={(v) => { if (v) void run(async () => { await setManager(month, v, me!.id); notifyManager(v, monthLabel(month), { id: me!.id, name: me!.name }); }, "Manager updated"); }} options={[{ value: "", label: "Choose the manager" }, ...roommates.map((r) => ({ value: r.id, label: r.name }))]} />
+         <p className="mt-1.5 text-xs text-muted-foreground">The manager collects rent, fixed charges and fronts meter bills. Changing the manager changes who is owed the fixed charges.</p>
+       </div>
+       <div className="rounded-xl bg-muted p-4"><p className="text-xs text-muted-foreground">Dues still pending with {monthDoc?.managerId ? nameOf(monthDoc.managerId) : "the manager"}</p><Money paise={pending} className="text-2xl font-extrabold text-primary" /><p className="mt-1 text-xs text-muted-foreground">Record payments in Settle Up → Rent, fixed charges & meter dues.</p></div>
+diff --git a/src/routes/settlement.tsx b/src/routes/settlement.tsx
+index e6e902e..6ecdfd8 100644
+--- a/src/routes/settlement.tsx
++++ b/src/routes/settlement.tsx
+@@ -1,6 +1,6 @@
+ import { createFileRoute } from "@tanstack/react-router";
+ import { useMemo, useState } from "react";
+-import { ArrowRight, BadgeCheck, ChevronRight, Undo2 } from "lucide-react";
++import { ArrowRight, BadgeCheck, BellRing, ChevronRight, Undo2 } from "lucide-react";
+ import { toast } from "sonner";
+ import { Button } from "@/components/ui/button";
+ import { Input } from "@/components/ui/input";
+@@ -9,6 +9,7 @@ import { Avatar, EmptyState, LoadingBlock, Money, PageHeader, ProgressBar, Respo
+ import { useDialogs } from "@/components/dialogs";
+ import { useLedger } from "@/lib/data";
+ import { reversePayment } from "@/lib/db";
++import { nudge, notifyPayment } from "@/lib/notifications";
+ import { activePayments, buildBalances, byDateDesc, dayHeading, duesObligations, expenseObligations, shortDate, type Balance, type Obligation, type Payment } from "@/lib/ledger";
+ import { formatPaise } from "@/lib/money";
+ 
+@@ -23,7 +24,8 @@ const sum = (xs: Obligation[]) => xs.reduce((s, x) => s + x.amountPaise, 0);
+ function SettlePage() {
+   const L = useLedger();
+   const { pay } = useDialogs();
+-  const { expenses, payments, monthDoc, me, nameOf, loading } = L;
++  const { expenses, payments, monthDoc, me, nameOf, loading, roommates } = L;
++  const [nudgingAll, setNudgingAll] = useState(false);
+   const [scope, setScope] = useState<"mine" | "all">("mine");
+   const [openKey, setOpenKey] = useState<string | null>(null);
+ 
+@@ -40,10 +42,22 @@ function SettlePage() {
+   const paid = activePayments(payments).reduce((s, p) => s + p.amountPaise, 0);
+   const mineOnly = (b: Balance) => scope === "all" || b.fromId === me?.id || b.toId === me?.id;
+   const selected = all.find((b) => keyOf(b) === openKey) ?? null;
++  // People who still owe me anything (all buckets combined), for the one-tap "Nudge everyone" button.
++  const debtors = [...open.filter((b) => b.toId === me?.id).reduce((m, b) => m.set(b.fromId, (m.get(b.fromId) ?? 0) + b.remainingPaise), new Map<string, number>())];
++  const nudgeAll = async () => {
++    if (!me) return;
++    setNudgingAll(true);
++    const results = await Promise.all(debtors.map(([id, amt]) => nudge(me, { debtorId: id, amountPaise: amt, what: "what's pending this month" }, roommates.find((x) => x.id === me.id)?.upiId)));
++    setNudgingAll(false);
++    const sent = results.filter((r) => r === "sent").length;
++    if (sent) toast.success(`Nudged ${sent} ${sent === 1 ? "person" : "people"}`);
++    else if (results.every((r) => r === "already")) toast("Everyone was already nudged today");
++    else toast.error("Couldn't send the nudges. Try again.");
++  };
+ 
+   return (
+     <div className="space-y-5">
+-      <PageHeader title="Settle Up" subtitle="Who owes whom this month" />
++      <PageHeader title="Settle Up" subtitle="Who owes whom this month" action={debtors.length ? <Button variant="outline" className="h-11" disabled={nudgingAll} onClick={() => void nudgeAll()}><BellRing className="mr-2 size-4" />{nudgingAll ? "Sending…" : `Nudge ${debtors.length === 1 ? nameOf(debtors[0]![0]) : "everyone"}`}</Button> : undefined} />
+       <section className="grid grid-cols-2 gap-3" aria-label="Monthly settlement summary">
+         <StatCard label="You owe" value={<Money paise={owe} />} tone={owe ? "warning" : "default"} />
+         <StatCard label="You are owed" value={<Money paise={owed} />} tone={owed ? "success" : "default"} />
+@@ -65,7 +79,17 @@ function SettlePage() {
+ }
+ 
+ function Section({ title, hint, items, onOpen, onPay }: { title: string; hint: string; items: Balance[]; onOpen: (k: string) => void; onPay: (b: Balance) => void }) {
+-  const { nameOf, me } = useLedger();
++  const { nameOf, me, roommates } = useLedger();
++  const [nudging, setNudging] = useState<string | null>(null);
++  const sendNudge = async (b: Balance) => {
++    if (!me) return;
++    setNudging(keyOf(b));
++    const r = await nudge(me, { debtorId: b.fromId, amountPaise: b.remainingPaise, what: b.kind === "dues" ? "rent, fixed charges and meter bills" : "shared expenses" }, roommates.find((x) => x.id === me.id)?.upiId);
++    setNudging(null);
++    if (r === "sent") toast.success(`Nudged ${nameOf(b.fromId)}`);
++    else if (r === "already") toast(`You already nudged ${nameOf(b.fromId)} today`, { description: "Try again tomorrow. If this is your first nudge, publish the latest firestore.rules." });
++    else toast.error("Couldn't send the nudge. Check your connection and try again.");
++  };
+   return (
+     <section>
+       <h2 className="font-bold">{title}</h2>
+@@ -89,6 +113,9 @@ function Section({ title, hint, items, onOpen, onPay }: { title: string; hint: s
+                   <Button className="bg-grad-primary h-11 text-white" disabled={b.settled} onClick={() => onPay(b)}>{b.settled ? "All paid" : "Record payment"}</Button>
+                   <Button variant="outline" className="h-11" onClick={() => onOpen(keyOf(b))} aria-label="See breakdown">Details<ChevronRight className="ml-1 size-4" /></Button>
+                 </div>
++                {b.toId === me?.id && !b.settled ? (
++                  <Button variant="outline" className="mt-2 h-11 w-full" disabled={nudging === keyOf(b)} onClick={() => void sendNudge(b)}><BellRing className="mr-2 size-4" />{nudging === keyOf(b) ? "Sending…" : `Nudge ${nameOf(b.fromId)} to pay`}</Button>
++                ) : null}
+               </article>
+             );
+           })}
+@@ -197,7 +224,7 @@ function ReverseDialog({ payment, onClose }: { payment: Payment; onClose: () =>
+           <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
+           <Button disabled={busy || !reason.trim() || !me} onClick={async () => {
+             setBusy(true);
+-            try { await reversePayment(payment, reason.trim(), me!.id); toast.success("Payment reversed"); onClose(); } catch (e) { toast.error((e as Error).message); setBusy(false); }
++            try { await reversePayment(payment, reason.trim(), me!.id); notifyPayment({ fromId: payment.fromId, toId: payment.toId, amountPaise: payment.amountPaise }, { id: me!.id, name: me!.name }, nameOf, true); toast.success("Payment reversed"); onClose(); } catch (e) { toast.error((e as Error).message); setBusy(false); }
+           }}>Reverse payment</Button>
+         </AlertDialogFooter>
+       </AlertDialogContent>

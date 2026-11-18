@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Avatar, Money, NativeSelect, ProgressBar, ResponsiveSheet } from "./kit";
 import { useLedger } from "@/lib/data";
 import { recordPayment } from "@/lib/db";
+import { notifyPayment } from "@/lib/notifications";
 import { uuid } from "@/lib/uuid";
 import { formatPaise, paiseToRupeesString } from "@/lib/money";
 import { evalAmount } from "@/lib/calc";
@@ -33,6 +34,7 @@ export function PaymentDialog({ balance, onClose }: { balance: Balance; onClose:
     setBusy(true);
     try {
       await recordPayment(requestId, { month, fromId: balance.fromId, toId: balance.toId, amountPaise: amount, kind: balance.kind, date, method, reference: reference.trim(), note: note.trim() }, me.id);
+      notifyPayment({ fromId: balance.fromId, toId: balance.toId, amountPaise: amount }, { id: me.id, name: me.name }, nameOf, false);
       toast.success(`Recorded ${formatPaise(amount)} from ${nameOf(balance.fromId)} to ${nameOf(balance.toId)}`);
       onClose();
     } catch (e) {

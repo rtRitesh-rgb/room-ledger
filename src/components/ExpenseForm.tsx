@@ -14,6 +14,8 @@ import { AmountInput } from "./AmountInput";
 import { evalAmount, resolveAmountText } from "@/lib/calc";
 import { useLedger } from "@/lib/data";
 import { deleteExpense, saveExpense } from "@/lib/db";
+import { notifyExpenseSaved } from "@/lib/notifications";
+import { friendlyError } from "@/lib/errors";
 import { uploadReceipt } from "@/lib/receipts";
 import { computeSplit, type SplitMode } from "@/lib/money";
 import { currentMonth, todayISO, type Expense } from "@/lib/ledger";
@@ -79,10 +81,11 @@ export function ExpenseForm({ expense, onClose }: { expense?: Expense; onClose: 
         me.id,
         expense,
       );
+      notifyExpenseSaved({ name: name.trim(), amountPaise: total, shares: split.shares, isPersonal: mode === "personal" }, { id: me.id, name: me.name }, !!expense);
       toast.success(expense ? "Expense updated" : "Expense saved");
       onClose();
     } catch (e) {
-      toast.error((e as Error).message || "Couldn't save. Nothing was changed.");
+      toast.error(friendlyError(e));
     } finally {
       setBusy(false);
     }

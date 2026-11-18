@@ -14,6 +14,8 @@ import { DailyLimitCard } from "@/components/DailyLimit";
 import { ICON_NAMES } from "@/components/category-icons";
 import { ThemeToggle } from "@/components/Shell";
 import { useLedger } from "@/lib/data";
+import { notifyManager } from "@/lib/notifications";
+import { friendlyError } from "@/lib/errors";
 import { addRate, saveCategory, saveFixedCharge, saveSettings, setAllocation, setManager, updateMyUpi } from "@/lib/db";
 import { evalAmount } from "@/lib/calc";
 import { useSession } from "@/lib/session";
@@ -50,7 +52,7 @@ function HouseholdPage() {
 }
 
 const AdminNote = () => <p className="mb-3 rounded-xl bg-muted p-3 text-xs text-muted-foreground">Only household admins can change this. You're viewing it read-only.</p>;
-const run = async (fn: () => Promise<unknown>, ok: string) => { try { await fn(); toast.success(ok); return true; } catch (e) { toast.error((e as Error).message || "Couldn't save."); return false; } };
+const run = async (fn: () => Promise<unknown>, ok: string) => { try { await fn(); toast.success(ok); return true; } catch (e) { toast.error(friendlyError(e)); return false; } };
 
 // ───────── My wallet (private: nobody else can see or change it) ─────────
 function WalletTab() {
@@ -123,7 +125,7 @@ function ManagerTab() {
     <section className="panel space-y-4 p-4">
       <div>
         <Label>Manager for {monthLabel(month)}</Label>
-        <NativeSelect className="mt-1.5" aria-label="Manager" value={monthDoc?.managerId ?? ""} onChange={(v) => { if (v) void run(() => setManager(month, v, me!.id), "Manager updated"); }} options={[{ value: "", label: "Choose the manager" }, ...roommates.map((r) => ({ value: r.id, label: r.name }))]} />
+        <NativeSelect className="mt-1.5" aria-label="Manager" value={monthDoc?.managerId ?? ""} onChange={(v) => { if (v) void run(async () => { await setManager(month, v, me!.id); notifyManager(v, monthLabel(month), { id: me!.id, name: me!.name }); }, "Manager updated"); }} options={[{ value: "", label: "Choose the manager" }, ...roommates.map((r) => ({ value: r.id, label: r.name }))]} />
         <p className="mt-1.5 text-xs text-muted-foreground">The manager collects rent, fixed charges and fronts meter bills. Changing the manager changes who is owed the fixed charges.</p>
       </div>
       <div className="rounded-xl bg-muted p-4"><p className="text-xs text-muted-foreground">Dues still pending with {monthDoc?.managerId ? nameOf(monthDoc.managerId) : "the manager"}</p><Money paise={pending} className="text-2xl font-extrabold text-primary" /><p className="mt-1 text-xs text-muted-foreground">Record payments in Settle Up → Rent, fixed charges & meter dues.</p></div>

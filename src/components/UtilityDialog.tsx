@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Money, ResponsiveSheet, cx } from "./kit";
 import { useLedger } from "@/lib/data";
 import { addRate, fetchLastReading, saveUtilityBill } from "@/lib/db";
+import { notifyBill } from "@/lib/notifications";
 import { formatMilli, formatPaise, paiseToRupeesString, parseMilli, parseRupees, splitEqual } from "@/lib/money";
 import { Checkbox } from "@/components/ui/checkbox";
 import { currentMonth, previewBill, resolveRate, type UtilityKind } from "@/lib/ledger";
@@ -62,6 +63,7 @@ export function UtilityDialog({ onClose }: { onClose: () => void }) {
     setBusy(true);
     try {
       await saveUtilityBill({ kind, startMilli: s, endMilli: e, unitsMilli: prev.unitsMilli, ratePaise: usedRate, amountPaise: prev.amountPaise, readingDate: date, payerId, shares }, me.id);
+      notifyBill({ kind, amountPaise: prev.amountPaise, shares }, { id: me.id, name: me.name });
       if (saveRate && rateChanged && isAdmin) {
         try { await addRate({ kind, ratePaise: usedRate, effectiveMonth: date.slice(0, 7), note: "Set while recording a reading" }, me.id); }
         catch { toast.error("Bill saved, but the new default rate couldn't be saved. Set it in Household → Utility rates."); onClose(); return; }

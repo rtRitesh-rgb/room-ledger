@@ -93,6 +93,23 @@ service cloud.firestore {
     }
     match /months/{id} { allow read: if isMember(); allow write: if isMember(); }
 
+    // NOTIFICATIONS (nudges, month-end reminders, activity). Only the recipient can read, mark read, or delete them.
+    // Anyone can send one, but only as themselves. Nudges use a per-day id, so a pair can only be nudged once a day.
+    match /notifications/{id} {
+      allow read: if isMember() && resource.data.toId == myId();
+      allow create: if isMember()
+        && request.resource.data.fromId == myId()
+        && request.resource.data.toId is string
+        && request.resource.data.title is string && request.resource.data.title.size() <= 200
+        && request.resource.data.body is string && request.resource.data.body.size() <= 600
+        && request.resource.data.readAtMs == null
+        && (request.resource.data.type != 'nudge'
+            || id.matches('nudge_' + myId() + '_' + request.resource.data.toId + '_.*'));
+      allow update: if isMember() && resource.data.toId == myId()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readAtMs']);
+      allow delete: if isMember() && resource.data.toId == myId();
+    }
+
     // Append-only audit trail.
     match /audit/{id} {
       allow read: if isMember() && (isAdmin() || resource.data.actorId == myId());
