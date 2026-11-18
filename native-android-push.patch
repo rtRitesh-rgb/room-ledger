@@ -1,0 +1,277 @@
+diff --git a/android-native/AndroidBridge.kt b/android-native/AndroidBridge.kt
+new file mode 100644
+index 0000000..cdf23d9
+--- /dev/null
++++ b/android-native/AndroidBridge.kt
+@@ -0,0 +1,36 @@
++package com.example.roomledger // TODO: change to YOUR app's package name
++
++import android.Manifest
++import android.app.Activity
++import android.content.Context
++import android.os.Build
++import android.webkit.JavascriptInterface
++import androidx.core.app.NotificationManagerCompat
++import com.google.firebase.messaging.FirebaseMessaging
++
++/** Exposed to the web app as `window.AndroidBridge` (see src/lib/push.ts). */
++class AndroidBridge(private val activity: Activity) {
++    private val prefs = activity.getSharedPreferences("push", Context.MODE_PRIVATE)
++
++    @JavascriptInterface fun getFcmToken(): String = prefs.getString("token", "") ?: ""
++
++    @JavascriptInterface fun hasPermission(): Boolean = NotificationManagerCompat.from(activity).areNotificationsEnabled()
++
++    @JavascriptInterface fun requestPermission() {
++        if (Build.VERSION.SDK_INT >= 33) {
++            activity.runOnUiThread { activity.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001) }
++        }
++    }
++
++    @JavascriptInterface fun show(title: String, body: String, link: String, tag: String) =
++        NotificationHelper.show(activity, title, body, link, tag)
++
++    companion object {
++        /** Call once from MainActivity.onCreate so the token is ready before the web app asks for it. */
++        fun refreshToken(ctx: Context) {
++            FirebaseMessaging.getInstance().token.addOnSuccessListener { t ->
++                ctx.getSharedPreferences("push", Context.MODE_PRIVATE).edit().putString("token", t).apply()
++            }
++        }
++    }
++}
+diff --git a/android-native/NotificationHelper.kt b/android-native/NotificationHelper.kt
+new file mode 100644
+index 0000000..bfd0897
+--- /dev/null
++++ b/android-native/NotificationHelper.kt
+@@ -0,0 +1,37 @@
++package com.example.roomledger // TODO: change to YOUR app's package name
++
++import android.app.NotificationChannel
++import android.app.NotificationManager
++import android.app.PendingIntent
++import android.content.Context
++import android.content.Intent
++import android.os.Build
++import androidx.core.app.NotificationCompat
++import androidx.core.app.NotificationManagerCompat
++
++object NotificationHelper {
++    private const val CHANNEL_ID = "room_ledger_alerts"
++
++    fun show(ctx: Context, title: String, body: String, link: String, tag: String) {
++        if (!NotificationManagerCompat.from(ctx).areNotificationsEnabled()) return
++        val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
++        if (Build.VERSION.SDK_INT >= 26) {
++            nm.createNotificationChannel(NotificationChannel(CHANNEL_ID, "Room Ledger alerts", NotificationManager.IMPORTANCE_HIGH))
++        }
++        val intent = Intent(ctx, MainActivity::class.java).apply {
++            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
++            putExtra("link", link)
++        }
++        val pi = PendingIntent.getActivity(ctx, tag.hashCode(), intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
++        val n = NotificationCompat.Builder(ctx, CHANNEL_ID)
++            .setSmallIcon(R.mipmap.ic_launcher)
++            .setContentTitle(title)
++            .setContentText(body)
++            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
++            .setPriority(NotificationCompat.PRIORITY_HIGH)
++            .setAutoCancel(true)
++            .setContentIntent(pi)
++            .build()
++        nm.notify(tag, 0, n) // same tag = replaces instead of duplicating
++    }
++}
+diff --git a/android-native/PushService.kt b/android-native/PushService.kt
+new file mode 100644
+index 0000000..9e23e00
+--- /dev/null
++++ b/android-native/PushService.kt
+@@ -0,0 +1,23 @@
++package com.example.roomledger // TODO: change to YOUR app's package name
++
++import android.content.Context
++import com.google.firebase.messaging.FirebaseMessagingService
++import com.google.firebase.messaging.RemoteMessage
++
++/** Receives FCM pushes (also when the app is closed) and shows a real Android notification. */
++class PushService : FirebaseMessagingService() {
++    override fun onNewToken(token: String) {
++        getSharedPreferences("push", Context.MODE_PRIVATE).edit().putString("token", token).apply()
++    }
++
++    override fun onMessageReceived(message: RemoteMessage) {
++        val d = message.data
++        NotificationHelper.show(
++            this,
++            d["title"] ?: "Room Ledger",
++            d["body"] ?: "",
++            d["link"] ?: "/",
++            d["tag"] ?: System.currentTimeMillis().toString(),
++        )
++    }
++}
+diff --git a/android-native/README.md b/android-native/README.md
+new file mode 100644
+index 0000000..4894496
+--- /dev/null
++++ b/android-native/README.md
+@@ -0,0 +1,53 @@
++# Android side (personal APK, no Play Store, all free)
++
++Everything here is free: FCM has no limits and works on Firebase's free Spark plan.
++
++## 1. Firebase
++Firebase console → your project → **Add app → Android**. Use your app's package name (see `applicationId` in
++`app/build.gradle`). Download **google-services.json** and put it in `app/`.
++
++## 2. Gradle
++Project-level `build.gradle` (or `build.gradle.kts`) plugins block:
++    id 'com.google.gms.google-services' version '4.4.2' apply false
++`app/build.gradle` plugins block:
++    id 'com.google.gms.google-services'
++`app/build.gradle` dependencies:
++    implementation platform('com.google.firebase:firebase-bom:33.1.0')
++    implementation 'com.google.firebase:firebase-messaging'
++    implementation 'androidx.core:core-ktx:1.13.1'
++
++## 3. Copy the 3 Kotlin files
++Copy `PushService.kt`, `NotificationHelper.kt`, `AndroidBridge.kt` into `app/src/main/java/<your/package>/`
++and change the `package` line at the top of each to your package name.
++
++## 4. AndroidManifest.xml
++Above `<application>`:
++    <uses-permission android:name="android.permission.INTERNET"/>
++    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
++Inside `<application>`:
++    <service android:name=".PushService" android:exported="false">
++      <intent-filter><action android:name="com.google.firebase.MESSAGING_EVENT"/></intent-filter>
++    </service>
++Also set `android:launchMode="singleTop"` on your MainActivity.
++
++## 5. MainActivity (adapt to your code; BASE_URL = your deployed site, e.g. "https://your-app.vercel.app")
++In onCreate, BEFORE `webView.loadUrl(...)`:
++    webView.settings.javaScriptEnabled = true
++    webView.settings.domStorageEnabled = true
++    webView.addJavascriptInterface(AndroidBridge(this), "AndroidBridge")
++    AndroidBridge.refreshToken(this)
++Open the page from a notification tap (in onCreate after loadUrl, and also in onNewIntent):
++    override fun onNewIntent(intent: Intent) {
++        super.onNewIntent(intent)
++        intent.getStringExtra("link")?.let { webView.loadUrl(BASE_URL + it) }
++    }
++The app must load your deployed https site (not localhost), because the web app calls /api/push on its own origin.
++
++## 6. Server (Vercel, free Hobby plan)
++Set `FIREBASE_SERVICE_ACCOUNT` (service-account JSON, see PUSH_SETUP.md step 2) and redeploy.
++`VITE_FIREBASE_VAPID_KEY` is NOT needed for the Android app.
++Publish `firestore.rules` as described in PUSH_SETUP.md step 1.
++
++## 7. Test
++Rebuild the APK, install it, open the app, tap **Turn on** on the banner, allow notifications,
++close the app completely, then ask another roommate to nudge you (or use bell → Send test while the app is open).
+diff --git a/src/lib/notify.tsx b/src/lib/notify.tsx
+index d203cc8..3671f36 100644
+--- a/src/lib/notify.tsx
++++ b/src/lib/notify.tsx
+@@ -8,7 +8,7 @@ import {
+ } from "./ledger";
+ import { formatPaise } from "./money";
+ import { markAllRead, markRead, removeMany, removeNotification, sendNotification, type AppNotification } from "./notifications";
+-import { pushConfigured, registerPush, type PushResult } from "./push";
++import { nativeBridge, pushConfigured, registerPush, type PushResult } from "./push";
+ 
+ type Permission = "unsupported" | "default" | "granted" | "denied";
+ 
+@@ -39,10 +39,17 @@ const THIRTY_DAYS = 30 * 24 * 3600 * 1000;
+ const loadSet = (key: string): Set<string> => { try { return new Set(JSON.parse(localStorage.getItem(key) ?? "[]") as string[]); } catch { return new Set(); } };
+ const saveSet = (key: string, s: Set<string>) => { try { localStorage.setItem(key, JSON.stringify([...s].slice(-400))); } catch { /* ignore */ } };
+ 
+-const getPermission = (): Permission => (typeof window === "undefined" || !("Notification" in window) ? "unsupported" : (Notification.permission as Permission));
++const getPermission = (): Permission => {
++  if (typeof window === "undefined") return "unsupported";
++  const b = nativeBridge();
++  if (b) return b.hasPermission() ? "granted" : "default";
++  return !("Notification" in window) ? "unsupported" : (Notification.permission as Permission);
++};
+ 
+ /** Shows an OS-level alert. Uses the service worker when available (needed on Android Chrome / installed PWAs). */
+ async function showDeviceAlert(n: AppNotification) {
++  const b = nativeBridge();
++  if (b) { try { b.show(n.title, n.body, n.link, n.id); } catch { /* ignore */ } return; } // Android app: native notification (same tag as the push, so it replaces instead of duplicating)
+   const opts: NotificationOptions = { body: n.body, icon: "/icons/icon-192.png", badge: "/icons/favicon-32.png", tag: n.id, data: { url: n.link } };
+   try {
+     // Phones (Android Chrome / installed apps) only allow notifications through the service worker.
+@@ -165,7 +172,13 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
+ 
+   const enableAlerts = useCallback(async (): Promise<Permission> => {
+     if (getPermission() === "unsupported") return "unsupported";
+-    const res = (await Notification.requestPermission()) as Permission;
++    const b = nativeBridge();
++    let res: Permission;
++    if (b) {
++      b.requestPermission();
++      for (let i = 0; i < 60 && !b.hasPermission(); i++) await new Promise((r) => setTimeout(r, 500));
++      res = b.hasPermission() ? "granted" : "denied";
++    } else res = (await Notification.requestPermission()) as Permission;
+     setPermission(res);
+     if (res === "granted" && meId) setPushState(await registerPush(meId));
+     return res;
+diff --git a/src/lib/push.ts b/src/lib/push.ts
+index 3fdb5de..0b98134 100644
+--- a/src/lib/push.ts
++++ b/src/lib/push.ts
+@@ -10,6 +10,16 @@ import { auth, db } from "./firebase";
+ const VAPID = import.meta.env["VITE_FIREBASE_VAPID_KEY"] as string | undefined;
+ export const pushConfigured = Boolean(VAPID);
+ 
++/** Bridge injected by the Android app (see android-native/README.md). Absent in a normal browser. */
++type AndroidBridge = {
++  getFcmToken(): string;
++  hasPermission(): boolean;
++  requestPermission(): void;
++  show(title: string, body: string, link: string, tag: string): void;
++};
++declare global { interface Window { AndroidBridge?: AndroidBridge } }
++export const nativeBridge = (): AndroidBridge | null => (typeof window !== "undefined" && window.AndroidBridge ? window.AndroidBridge : null);
++
+ export type PushResult = "ok" | "no-key" | "no-permission" | "unsupported" | "failed";
+ 
+ export async function pushSupported(): Promise<boolean> {
+@@ -24,6 +34,23 @@ export async function pushSupported(): Promise<boolean> {
+ 
+ /** Gets this device's push token and saves it against the signed-in roommate. Safe to call on every launch. */
+ export async function registerPush(roommateId: string): Promise<PushResult> {
++  // Inside the Android app: use the native FCM token handed over by the bridge (WebView has no web push).
++  const native = nativeBridge();
++  if (native) {
++    try {
++      if (!native.hasPermission()) return "no-permission";
++      let token = "";
++      for (let i = 0; i < 20 && !token; i++) {
++        token = native.getFcmToken();
++        if (!token) await new Promise((r) => setTimeout(r, 500));
++      }
++      if (!token) return "failed";
++      await setDoc(doc(db, "pushTokens", token), { roommateId, createdAtMs: Date.now(), agent: "android-app" });
++      return "ok";
++    } catch {
++      return "failed";
++    }
++  }
+   if (!VAPID) return "no-key";
+   if (typeof Notification === "undefined" || Notification.permission !== "granted") return "no-permission";
+   if (!(await pushSupported())) return "unsupported";
+diff --git a/src/routes/api.push.ts b/src/routes/api.push.ts
+index 710a264..0865a97 100644
+--- a/src/routes/api.push.ts
++++ b/src/routes/api.push.ts
+@@ -58,6 +58,7 @@ export const Route = createFileRoute("/api/push")({
+               tokens,
+               data: { title: n.title, body: n.body, link: n.link ?? "/", tag: id },
+               webpush: { headers: { Urgency: "high", TTL: "86400" } },
++              android: { priority: "high", ttl: 86400 * 1000 },
+             });
+             sent += res.successCount;
+             // Drop tokens for uninstalled / revoked devices so they don't pile up.

@@ -8,7 +8,7 @@ import {
 } from "./ledger";
 import { formatPaise } from "./money";
 import { markAllRead, markRead, removeMany, removeNotification, sendNotification, type AppNotification } from "./notifications";
-import { pushConfigured, registerPush, type PushResult } from "./push";
+import { nativeBridge, pushConfigured, registerPush, type PushResult } from "./push";
 
 type Permission = "unsupported" | "default" | "granted" | "denied";
 
@@ -39,10 +39,17 @@ const THIRTY_DAYS = 30 * 24 * 3600 * 1000;
 const loadSet = (key: string): Set<string> => { try { return new Set(JSON.parse(localStorage.getItem(key) ?? "[]") as string[]); } catch { return new Set(); } };
 const saveSet = (key: string, s: Set<string>) => { try { localStorage.setItem(key, JSON.stringify([...s].slice(-400))); } catch { /* ignore */ } };
 
-const getPermission = (): Permission => (typeof window === "undefined" || !("Notification" in window) ? "unsupported" : (Notification.permission as Permission));
+const getPermission = (): Permission => {
+  if (typeof window === "undefined") return "unsupported";
+  const b = nativeBridge();
+  if (b) return b.hasPermission() ? "granted" : "default";
+  return !("Notification" in window) ? "unsupported" : (Notification.permission as Permission);
+};
 
 /** Shows an OS-level alert. Uses the service worker when available (needed on Android Chrome / installed PWAs). */
 async function showDeviceAlert(n: AppNotification) {
+  const b = nativeBridge();
+  if (b) { try { b.show(n.title, n.body, n.link, n.id); } catch { /* ignore */ } return; } // Android app: native notification (same tag as the push, so it replaces instead of duplicating)
   const opts: NotificationOptions = { body: n.body, icon: "/icons/icon-192.png", badge: "/icons/favicon-32.png", tag: n.id, data: { url: n.link } };
   try {
     // Phones (Android Chrome / installed apps) only allow notifications through the service worker.
@@ -165,7 +172,13 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
 
   const enableAlerts = useCallback(async (): Promise<Permission> => {
     if (getPermission() === "unsupported") return "unsupported";
-    const res = (await Notification.requestPermission()) as Permission;
+    const b = nativeBridge();
+    let res: Permission;
+    if (b) {
+      b.requestPermission();
+      for (let i = 0; i < 60 && !b.hasPermission(); i++) await new Promise((r) => setTimeout(r, 500));
+      res = b.hasPermission() ? "granted" : "denied";
+    } else res = (await Notification.requestPermission()) as Permission;
     setPermission(res);
     if (res === "granted" && meId) setPushState(await registerPush(meId));
     return res;

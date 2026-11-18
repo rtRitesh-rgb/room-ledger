@@ -10,6 +10,16 @@ import { auth, db } from "./firebase";
 const VAPID = import.meta.env["VITE_FIREBASE_VAPID_KEY"] as string | undefined;
 export const pushConfigured = Boolean(VAPID);
 
+/** Bridge injected by the Android app (see android-native/README.md). Absent in a normal browser. */
+type AndroidBridge = {
+  getFcmToken(): string;
+  hasPermission(): boolean;
+  requestPermission(): void;
+  show(title: string, body: string, link: string, tag: string): void;
+};
+declare global { interface Window { AndroidBridge?: AndroidBridge } }
+export const nativeBridge = (): AndroidBridge | null => (typeof window !== "undefined" && window.AndroidBridge ? window.AndroidBridge : null);
+
 export type PushResult = "ok" | "no-key" | "no-permission" | "unsupported" | "failed";
 
 export async function pushSupported(): Promise<boolean> {
@@ -24,6 +34,23 @@ export async function pushSupported(): Promise<boolean> {
 
 /** Gets this device's push token and saves it against the signed-in roommate. Safe to call on every launch. */
 export async function registerPush(roommateId: string): Promise<PushResult> {
+  // Inside the Android app: use the native FCM token handed over by the bridge (WebView has no web push).
+  const native = nativeBridge();
+  if (native) {
+    try {
+      if (!native.hasPermission()) return "no-permission";
+      let token = "";
+      for (let i = 0; i < 20 && !token; i++) {
+        token = native.getFcmToken();
+        if (!token) await new Promise((r) => setTimeout(r, 500));
+      }
+      if (!token) return "failed";
+      await setDoc(doc(db, "pushTokens", token), { roommateId, createdAtMs: Date.now(), agent: "android-app" });
+      return "ok";
+    } catch {
+      return "failed";
+    }
+  }
   if (!VAPID) return "no-key";
   if (typeof Notification === "undefined" || Notification.permission !== "granted") return "no-permission";
   if (!(await pushSupported())) return "unsupported";
