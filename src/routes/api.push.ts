@@ -1,4 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { getFirebaseAdmin } from "@/lib/server/firebase-admin";
 
 /**
  * POST /api/push  { ids: string[] }  with  Authorization: Bearer <Firebase ID token>
@@ -6,19 +7,8 @@ import { createFileRoute } from "@tanstack/react-router";
  * Needs the FIREBASE_SERVICE_ACCOUNT environment variable (service-account JSON). Without it this returns 503 and
  * the app keeps working with in-app notifications only.
  */
-const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
-
-async function getAdmin() {
-  const raw = process.env["FIREBASE_SERVICE_ACCOUNT"];
-  if (!raw) return null;
-  const [{ cert, getApps, initializeApp }, { getAuth }, { getFirestore }, { getMessaging }] = await Promise.all([
-    import("firebase-admin/app"), import("firebase-admin/auth"), import("firebase-admin/firestore"), import("firebase-admin/messaging"),
-  ]);
-  const sa = JSON.parse(raw) as { private_key?: string };
-  if (sa.private_key) sa.private_key = sa.private_key.replace(/\\n/g, "\n");
-  const app = getApps()[0] ?? initializeApp({ credential: cert(sa as never) });
-  return { auth: getAuth(app), db: getFirestore(app), messaging: getMessaging(app) };
-}
+const json = (status: number, body: unknown) =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 export const Route = createFileRoute("/api/push")({
   server: {
@@ -29,12 +19,23 @@ export const Route = createFileRoute("/api/push")({
         let ids: string[] = [];
         try {
           const body = (await request.json()) as { ids?: unknown };
-          ids = Array.isArray(body.ids) ? body.ids.filter((x): x is string => typeof x === "string" && x.length > 0 && x.length < 200).slice(0, 20) : [];
-        } catch { return json(400, { error: "Bad request." }); }
+          ids = Array.isArray(body.ids)
+            ? body.ids
+                .filter((x): x is string => typeof x === "string" && x.length > 0 && x.length < 200)
+                .slice(0, 20)
+            : [];
+        } catch {
+          return json(400, { error: "Bad request." });
+        }
         if (!ids.length) return json(400, { error: "No notification ids." });
 
         let admin;
-        try { admin = await getAdmin(); } catch (e) { console.error("push: admin init failed", e); return json(503, { error: "Push is misconfigured." }); }
+        try {
+          admin = await getFirebaseAdmin();
+        } catch (e) {
+          console.error("push: admin init failed", e);
+          return json(503, { error: "Push is misconfigured." });
+        }
         if (!admin) return json(503, { error: "Push is not set up on the server." });
 
         try {
@@ -47,11 +48,30 @@ export const Route = createFileRoute("/api/push")({
           for (const id of ids) {
             const ref = admin.db.collection("notifications").doc(id);
             const snap = await ref.get();
-            const n = snap.data() as { fromId: string; toId: string; title: string; body: string; link?: string; createdAtMs: number; pushedAtMs?: number } | undefined;
+            const n = snap.data() as
+              | {
+                  fromId: string;
+                  toId: string;
+                  title: string;
+                  body: string;
+                  link?: string;
+                  createdAtMs: number;
+                  pushedAtMs?: number;
+                }
+              | undefined;
             // Only the sender can trigger a push, only once, and only for a fresh notification.
-            if (!n || n.fromId !== callerId || n.pushedAtMs || Date.now() - n.createdAtMs > 10 * 60 * 1000) continue;
+            if (
+              !n ||
+              n.fromId !== callerId ||
+              n.pushedAtMs ||
+              Date.now() - n.createdAtMs > 10 * 60 * 1000
+            )
+              continue;
             await ref.update({ pushedAtMs: Date.now() });
-            const tokSnap = await admin.db.collection("pushTokens").where("roommateId", "==", n.toId).get();
+            const tokSnap = await admin.db
+              .collection("pushTokens")
+              .where("roommateId", "==", n.toId)
+              .get();
             const tokens = tokSnap.docs.map((d) => d.id);
             if (!tokens.length) continue;
             const res = await admin.messaging.sendEachForMulticast({
@@ -70,7 +90,16 @@ export const Route = createFileRoute("/api/push")({
             });
             sent += res.successCount;
             // Drop tokens for uninstalled / revoked devices so they don't pile up.
-            await Promise.all(res.responses.map((r, i) => (!r.success && /registration-token-not-registered|invalid-registration-token|invalid-argument/.test(r.error?.code ?? "") ? admin.db.collection("pushTokens").doc(tokens[i]!).delete() : null)));
+            await Promise.all(
+              res.responses.map((r, i) =>
+                !r.success &&
+                /registration-token-not-registered|invalid-registration-token|invalid-argument/.test(
+                  r.error?.code ?? "",
+                )
+                  ? admin.db.collection("pushTokens").doc(tokens[i]!).delete()
+                  : null,
+              ),
+            );
           }
           return json(200, { sent });
         } catch (e) {

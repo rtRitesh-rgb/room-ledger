@@ -69,6 +69,26 @@ service cloud.firestore {
         && request.resource.data.createdBy == resource.data.createdBy;
       allow delete: if isMember();
     }
+    // Shared household grocery lists. A planned item can be removed; purchase recording is one-way.
+    match /groceryItems/{itemId} {
+      allow read: if isMember();
+      allow create: if isMember()
+        && request.resource.data.addedBy == myId()
+        && request.resource.data.status == 'planned'
+        && request.resource.data.month is string
+        && request.resource.data.name is string && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 180
+        && request.resource.data.estimatedPricePaise is int && request.resource.data.estimatedPricePaise >= 0
+        && request.resource.data.platform in ['BlinkIt', 'Zepto', 'Swiggy'];
+      allow update: if isMember()
+        && resource.data.status == 'planned'
+        && request.resource.data.status == 'purchased'
+        && request.resource.data.purchasedBy == myId()
+        && request.resource.data.expenseId is string
+        && request.resource.data.purchaseAmountPaise is int
+        && request.resource.data.purchaseAmountPaise > 0
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'purchaseAmountPaise', 'purchasedBy', 'purchasedAtMs', 'expenseId']);
+      allow delete: if isMember() && resource.data.status == 'planned';
+    }
     match /utilityBills/{id} {
       allow read: if isMember();
       allow create: if isMember() && money(request.resource.data.amountPaise);

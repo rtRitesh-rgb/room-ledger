@@ -1,23 +1,58 @@
 import {
-  collection, doc, getDocs, limit, orderBy, query, runTransaction, setDoc, writeBatch,
-  type DocumentData, type DocumentSnapshot,
+  collection,
+  deleteDoc,
+  doc,
+  getDocs,
+  limit,
+  orderBy,
+  query,
+  runTransaction,
+  setDoc,
+  writeBatch,
+  type DocumentData,
+  type DocumentSnapshot,
 } from "firebase/firestore";
 import { db } from "./firebase";
 import {
-  buildFixedSnapshot, resolveFixedCharges, walletEntriesForExpense, walletEntriesForFixed, walletEntryIdsForExpense,
-  type Expense, type FixedCharge, type FixedSnapshotItem, type MonthDoc, type Payment, type Roommate, type Settings,
-  type UtilityBill, type UtilityKind, type WalletEntry,
+  buildFixedSnapshot,
+  resolveFixedCharges,
+  walletEntriesForExpense,
+  walletEntriesForFixed,
+  walletEntryIdsForExpense,
+  type Expense,
+  type FixedCharge,
+  type FixedSnapshotItem,
+  type MonthDoc,
+  type Payment,
+  type Roommate,
+  type Settings,
+  type UtilityBill,
+  type UtilityKind,
+  type WalletEntry,
 } from "./ledger";
 import { splitEqual, type Paise, type SplitMode } from "./money";
 import type { Category } from "./categories";
+import type { GroceryListItem, NewGroceryListItem } from "./grocery-list";
 
 export const C = {
-  roommates: "roommates", members: "members", settings: "settings", rates: "rates", fixed: "fixedCharges",
-  categories: "categories", allocations: "allocations", wallet: "walletEntries", expenses: "expenses",
-  bills: "utilityBills", payments: "payments", months: "months", audit: "audit",
+  roommates: "roommates",
+  members: "members",
+  settings: "settings",
+  rates: "rates",
+  fixed: "fixedCharges",
+  categories: "categories",
+  allocations: "allocations",
+  wallet: "walletEntries",
+  expenses: "expenses",
+  bills: "utilityBills",
+  payments: "payments",
+  months: "months",
+  audit: "audit",
+  groceryItems: "groceryItems",
 } as const;
 
-export const fromDoc = <T>(snap: DocumentSnapshot<DocumentData>): T => ({ ...snap.data(), id: snap.id }) as T;
+export const fromDoc = <T>(snap: DocumentSnapshot<DocumentData>): T =>
+  ({ ...snap.data(), id: snap.id }) as T;
 const strip = <T extends { id?: string }>(o: T): DocumentData => {
   const { id: _id, ...rest } = o;
   return rest;
@@ -25,10 +60,25 @@ const strip = <T extends { id?: string }>(o: T): DocumentData => {
 const newId = (col: string) => doc(collection(db, col)).id;
 const now = () => Date.now();
 
-function audit(actorId: string, action: string, entity: string, entityId: string, summary: string, data?: unknown) {
+function audit(
+  actorId: string,
+  action: string,
+  entity: string,
+  entityId: string,
+  summary: string,
+  data?: unknown,
+) {
   return {
     ref: doc(collection(db, C.audit)),
-    data: { atMs: now(), actorId, action, entity, entityId, summary, data: data === undefined ? "" : JSON.stringify(data).slice(0, 4000) },
+    data: {
+      atMs: now(),
+      actorId,
+      action,
+      entity,
+      entityId,
+      summary,
+      data: data === undefined ? "" : JSON.stringify(data).slice(0, 4000),
+    },
   };
 }
 
@@ -49,7 +99,11 @@ export type ExpenseInput = {
 };
 
 /** Atomically writes the expense and replaces its wallet ledger entries (ids are deterministic, so nothing double-counts). */
-export async function saveExpense(input: ExpenseInput, actorId: string, existing?: Expense): Promise<string> {
+export async function saveExpense(
+  input: ExpenseInput,
+  actorId: string,
+  existing?: Expense,
+): Promise<string> {
   const id = existing?.id ?? input.id ?? newId(C.expenses);
   await runTransaction(db, async (tx) => {
     const ref = doc(db, C.expenses, id);
@@ -58,25 +112,162 @@ export async function saveExpense(input: ExpenseInput, actorId: string, existing
       const snap = await tx.get(ref);
       if (!snap.exists()) throw new Error("This expense was deleted by someone else.");
       prev = fromDoc<Expense>(snap);
-      if (prev.version !== existing.version) throw new Error("Someone else just changed this expense. Close and reopen it to see the latest.");
+      if (prev.version !== existing.version)
+        throw new Error(
+          "Someone else just changed this expense. Close and reopen it to see the latest.",
+        );
     }
     const next: Expense = {
-      id, name: input.name.trim(), amountPaise: input.amountPaise, categoryId: input.categoryId, categoryLabel: input.categoryLabel,
-      payerId: input.payerId, splitMode: input.splitMode, isPersonal: input.splitMode === "personal",
-      kind: prev?.kind ?? "expense", spentOn: input.spentOn, month: input.spentOn.slice(0, 7), receiptUrl: input.receiptUrl,
-      note: input.note.trim(), shares: input.shares, version: (prev?.version ?? 0) + 1,
-      createdBy: prev?.createdBy ?? actorId, createdAtMs: prev?.createdAtMs ?? now(), updatedAtMs: now(),
+      id,
+      name: input.name.trim(),
+      amountPaise: input.amountPaise,
+      categoryId: input.categoryId,
+      categoryLabel: input.categoryLabel,
+      payerId: input.payerId,
+      splitMode: input.splitMode,
+      isPersonal: input.splitMode === "personal",
+      kind: prev?.kind ?? "expense",
+      spentOn: input.spentOn,
+      month: input.spentOn.slice(0, 7),
+      receiptUrl: input.receiptUrl,
+      note: input.note.trim(),
+      shares: input.shares,
+      version: (prev?.version ?? 0) + 1,
+      createdBy: prev?.createdBy ?? actorId,
+      createdAtMs: prev?.createdAtMs ?? now(),
+      updatedAtMs: now(),
     };
     if (prev) for (const wid of walletEntryIdsForExpense(prev)) tx.delete(doc(db, C.wallet, wid));
     tx.set(ref, strip(next));
     for (const w of walletEntriesForExpense(next)) tx.set(doc(db, C.wallet, w.id), strip(w));
     // Personal expenses are private to their owner, so the (household-wide) audit trail never records their name or amount.
     const a = next.isPersonal
-      ? audit(actorId, prev ? "update" : "create", "expense", id, `${prev ? "Edited" : "Added"} a personal expense`)
-      : audit(actorId, prev ? "update" : "create", "expense", id, `${prev ? "Edited" : "Added"} ${next.name}`, { before: prev && { amount: prev.amountPaise, shares: prev.shares }, after: { amount: next.amountPaise, shares: next.shares } });
+      ? audit(
+          actorId,
+          prev ? "update" : "create",
+          "expense",
+          id,
+          `${prev ? "Edited" : "Added"} a personal expense`,
+        )
+      : audit(
+          actorId,
+          prev ? "update" : "create",
+          "expense",
+          id,
+          `${prev ? "Edited" : "Added"} ${next.name}`,
+          {
+            before: prev && { amount: prev.amountPaise, shares: prev.shares },
+            after: { amount: next.amountPaise, shares: next.shares },
+          },
+        );
     tx.set(a.ref, a.data);
   });
   return id;
+}
+
+export async function addGroceryListItem(
+  input: NewGroceryListItem,
+  month: string,
+  actorId: string,
+): Promise<string> {
+  const ref = doc(collection(db, C.groceryItems));
+  const item: GroceryListItem = {
+    ...input,
+    id: ref.id,
+    month,
+    status: "planned",
+    addedBy: actorId,
+    addedAtMs: now(),
+    purchaseAmountPaise: null,
+    purchasedBy: null,
+    purchasedAtMs: null,
+    expenseId: null,
+  };
+  await setDoc(ref, strip(item));
+  return ref.id;
+}
+
+export async function removeGroceryListItem(item: GroceryListItem): Promise<void> {
+  if (item.status !== "planned")
+    throw new Error("Purchased grocery items stay in the shared list history.");
+  await deleteDoc(doc(db, C.groceryItems, item.id));
+}
+
+export async function recordGroceryPurchase(input: {
+  groceryItemId: string;
+  amountPaise: Paise;
+  payerId: string;
+  spentOn: string;
+  roommateIds: string[];
+  actorId: string;
+}): Promise<string> {
+  if (!Number.isInteger(input.amountPaise) || input.amountPaise <= 0)
+    throw new Error("Enter the actual purchase amount.");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input.spentOn)) throw new Error("Choose a valid purchase date.");
+  const roommateIds = [...new Set(input.roommateIds)];
+  if (!roommateIds.length || !roommateIds.includes(input.payerId))
+    throw new Error("Choose a valid payer and household split.");
+
+  const itemRef = doc(db, C.groceryItems, input.groceryItemId);
+  const expenseId = `grocery_${input.groceryItemId}`;
+  const expenseRef = doc(db, C.expenses, expenseId);
+  return runTransaction(db, async (tx) => {
+    const itemSnap = await tx.get(itemRef);
+    if (!itemSnap.exists()) throw new Error("This grocery item was removed.");
+    const item = fromDoc<GroceryListItem>(itemSnap);
+    if (item.status === "purchased" && item.expenseId) return item.expenseId;
+    if (item.status !== "planned") throw new Error("This grocery item is no longer available.");
+
+    const expenseSnap = await tx.get(expenseRef);
+    if (expenseSnap.exists())
+      throw new Error("This purchase already has an expense. Refresh the list.");
+
+    const shares = splitEqual(input.amountPaise, roommateIds);
+    const expense: Expense = {
+      id: expenseId,
+      name: item.name,
+      amountPaise: input.amountPaise,
+      categoryId: "general-groceries",
+      categoryLabel: "General groceries",
+      payerId: input.payerId,
+      splitMode: "equal",
+      isPersonal: false,
+      kind: "expense",
+      spentOn: input.spentOn,
+      month: input.spentOn.slice(0, 7),
+      receiptUrl: null,
+      note: `Purchased via Smart Grocery Finder${item.quantity ? ` · ${item.quantity}` : ""}`,
+      shares,
+      version: 1,
+      createdBy: input.actorId,
+      createdAtMs: now(),
+      updatedAtMs: now(),
+    };
+    tx.set(expenseRef, strip(expense));
+    for (const walletEntry of walletEntriesForExpense(expense))
+      tx.set(doc(db, C.wallet, walletEntry.id), strip(walletEntry));
+    tx.update(itemRef, {
+      status: "purchased",
+      purchaseAmountPaise: input.amountPaise,
+      purchasedBy: input.actorId,
+      purchasedAtMs: now(),
+      expenseId,
+    });
+    const a = audit(
+      input.actorId,
+      "create",
+      "expense",
+      expenseId,
+      `Recorded grocery purchase: ${item.name}`,
+      {
+        amount: input.amountPaise,
+        shares,
+        platform: item.platform,
+      },
+    );
+    tx.set(a.ref, a.data);
+    return expenseId;
+  });
 }
 
 export async function deleteExpense(e: Expense, actorId: string) {
@@ -88,7 +279,12 @@ export async function deleteExpense(e: Expense, actorId: string) {
     const cur = fromDoc<Expense>(snap);
     for (const wid of walletEntryIdsForExpense(cur)) tx.delete(doc(db, C.wallet, wid));
     tx.delete(ref);
-    const a = cur.isPersonal ? audit(actorId, "delete", "expense", e.id, "Deleted a personal expense") : audit(actorId, "delete", "expense", e.id, `Deleted ${cur.name}`, { amount: cur.amountPaise, shares: cur.shares });
+    const a = cur.isPersonal
+      ? audit(actorId, "delete", "expense", e.id, "Deleted a personal expense")
+      : audit(actorId, "delete", "expense", e.id, `Deleted ${cur.name}`, {
+          amount: cur.amountPaise,
+          shares: cur.shares,
+        });
     tx.set(a.ref, a.data);
   });
 }
@@ -96,8 +292,15 @@ export async function deleteExpense(e: Expense, actorId: string) {
 // ───────────── Utility bills ─────────────
 
 export type BillInput = {
-  kind: UtilityKind; startMilli: number; endMilli: number; unitsMilli: number; ratePaise: Paise; amountPaise: Paise;
-  readingDate: string; payerId: string; shares: Record<string, Paise>;
+  kind: UtilityKind;
+  startMilli: number;
+  endMilli: number;
+  unitsMilli: number;
+  ratePaise: Paise;
+  amountPaise: Paise;
+  readingDate: string;
+  payerId: string;
+  shares: Record<string, Paise>;
 };
 
 export async function saveUtilityBill(input: BillInput, actorId: string) {
@@ -106,51 +309,107 @@ export async function saveUtilityBill(input: BillInput, actorId: string) {
   const month = input.readingDate.slice(0, 7);
   const name = input.kind === "electricity" ? "Electricity meter" : "Gas meter";
   const expense: Expense = {
-    id: expenseId, name, amountPaise: input.amountPaise, categoryId: input.kind, categoryLabel: input.kind === "electricity" ? "Electricity" : "Gas",
-    payerId: input.payerId, splitMode: "equal", isPersonal: false, kind: "utility", spentOn: input.readingDate, month, receiptUrl: null, note: "",
-    shares: input.shares, version: 1, createdBy: actorId, createdAtMs: now(), updatedAtMs: now(),
+    id: expenseId,
+    name,
+    amountPaise: input.amountPaise,
+    categoryId: input.kind,
+    categoryLabel: input.kind === "electricity" ? "Electricity" : "Gas",
+    payerId: input.payerId,
+    splitMode: "equal",
+    isPersonal: false,
+    kind: "utility",
+    spentOn: input.readingDate,
+    month,
+    receiptUrl: null,
+    note: "",
+    shares: input.shares,
+    version: 1,
+    createdBy: actorId,
+    createdAtMs: now(),
+    updatedAtMs: now(),
   };
   const bill: UtilityBill = {
-    id: billId, kind: input.kind, startMilli: input.startMilli, endMilli: input.endMilli, unitsMilli: input.unitsMilli, ratePaise: input.ratePaise,
-    amountPaise: input.amountPaise, readingDate: input.readingDate, payerId: input.payerId, month, expenseId, createdAtMs: now(),
+    id: billId,
+    kind: input.kind,
+    startMilli: input.startMilli,
+    endMilli: input.endMilli,
+    unitsMilli: input.unitsMilli,
+    ratePaise: input.ratePaise,
+    amountPaise: input.amountPaise,
+    readingDate: input.readingDate,
+    payerId: input.payerId,
+    month,
+    expenseId,
+    createdAtMs: now(),
   };
   const batch = writeBatch(db);
   batch.set(doc(db, C.expenses, expenseId), strip(expense));
   batch.set(doc(db, C.bills, billId), strip(bill));
   for (const w of walletEntriesForExpense(expense)) batch.set(doc(db, C.wallet, w.id), strip(w));
-  const a = audit(actorId, "create", "utilityBill", billId, `Recorded ${name} bill`, { units: input.unitsMilli, rate: input.ratePaise, amount: input.amountPaise });
+  const a = audit(actorId, "create", "utilityBill", billId, `Recorded ${name} bill`, {
+    units: input.unitsMilli,
+    rate: input.ratePaise,
+    amount: input.amountPaise,
+  });
   batch.set(a.ref, a.data);
   await batch.commit();
 }
 
-export async function deleteUtilityBill(bill: UtilityBill, expense: Expense | undefined, actorId: string) {
+export async function deleteUtilityBill(
+  bill: UtilityBill,
+  expense: Expense | undefined,
+  actorId: string,
+) {
   const batch = writeBatch(db);
-  if (expense) for (const wid of walletEntryIdsForExpense(expense)) batch.delete(doc(db, C.wallet, wid));
+  if (expense)
+    for (const wid of walletEntryIdsForExpense(expense)) batch.delete(doc(db, C.wallet, wid));
   batch.delete(doc(db, C.expenses, bill.expenseId));
   batch.delete(doc(db, C.bills, bill.id));
-  const a = audit(actorId, "delete", "utilityBill", bill.id, `Deleted ${bill.kind} bill`, { amount: bill.amountPaise });
+  const a = audit(actorId, "delete", "utilityBill", bill.id, `Deleted ${bill.kind} bill`, {
+    amount: bill.amountPaise,
+  });
   batch.set(a.ref, a.data);
   await batch.commit();
 }
 
-export async function fetchLastReading(kind: UtilityKind): Promise<{ endMilli: number; readingDate: string } | null> {
-  const snap = await getDocs(query(collection(db, C.bills), orderBy("readingDate", "desc"), limit(12)));
+export async function fetchLastReading(
+  kind: UtilityKind,
+): Promise<{ endMilli: number; readingDate: string } | null> {
+  const snap = await getDocs(
+    query(collection(db, C.bills), orderBy("readingDate", "desc"), limit(12)),
+  );
   const hit = snap.docs.map((d) => fromDoc<UtilityBill>(d)).find((b) => b.kind === kind);
   return hit ? { endMilli: hit.endMilli, readingDate: hit.readingDate } : null;
 }
 
 // ───────────── Payments ─────────────
 
-export type PaymentInput = Pick<Payment, "month" | "fromId" | "toId" | "amountPaise" | "kind" | "date" | "method" | "reference" | "note">;
+export type PaymentInput = Pick<
+  Payment,
+  "month" | "fromId" | "toId" | "amountPaise" | "kind" | "date" | "method" | "reference" | "note"
+>;
 
 /** `requestId` becomes the document id, so a double-tap or retry can never record the payment twice. */
 export async function recordPayment(requestId: string, input: PaymentInput, actorId: string) {
   await runTransaction(db, async (tx) => {
     const ref = doc(db, C.payments, requestId);
     if ((await tx.get(ref)).exists()) return;
-    const p: Payment = { id: requestId, ...input, type: "payment", verified: false, reversesId: null, reversedById: null, createdBy: actorId, createdAtMs: now() };
+    const p: Payment = {
+      id: requestId,
+      ...input,
+      type: "payment",
+      verified: false,
+      reversesId: null,
+      reversedById: null,
+      createdBy: actorId,
+      createdAtMs: now(),
+    };
     tx.set(ref, strip(p));
-    const a = audit(actorId, "create", "payment", requestId, `Payment recorded`, { from: input.fromId, to: input.toId, amount: input.amountPaise });
+    const a = audit(actorId, "create", "payment", requestId, `Payment recorded`, {
+      from: input.fromId,
+      to: input.toId,
+      amount: input.amountPaise,
+    });
     tx.set(a.ref, a.data);
   });
 }
@@ -163,38 +422,68 @@ export async function reversePayment(original: Payment, reason: string, actorId:
     const snap = await tx.get(ref);
     if (!snap.exists()) throw new Error("Payment not found.");
     if (fromDoc<Payment>(snap).reversedById) throw new Error("This payment was already reversed.");
-    const rev: Payment = { ...original, id: reversalId, type: "reversal", reversesId: original.id, reversedById: null, note: reason, createdBy: actorId, createdAtMs: now() };
+    const rev: Payment = {
+      ...original,
+      id: reversalId,
+      type: "reversal",
+      reversesId: original.id,
+      reversedById: null,
+      note: reason,
+      createdBy: actorId,
+      createdAtMs: now(),
+    };
     tx.set(doc(db, C.payments, reversalId), strip(rev));
     tx.update(ref, { reversedById: reversalId });
-    const a = audit(actorId, "reverse", "payment", original.id, "Payment reversed", { reason, amount: original.amountPaise });
+    const a = audit(actorId, "reverse", "payment", original.id, "Payment reversed", {
+      reason,
+      amount: original.amountPaise,
+    });
     tx.set(a.ref, a.data);
   });
 }
 
 // ───────────── Months, manager, fixed charges ─────────────
 
-export async function ensureMonth(month: string, roommates: Roommate[], versions: readonly FixedCharge[]) {
+export async function ensureMonth(
+  month: string,
+  roommates: Roommate[],
+  versions: readonly FixedCharge[],
+) {
   await runTransaction(db, async (tx) => {
     const ref = doc(db, C.months, month);
     const snap = await tx.get(ref);
     const cur = snap.exists() ? (snap.data() as Partial<MonthDoc>) : {};
     if (cur.fixed) return;
-    const items = buildFixedSnapshot(resolveFixedCharges([...versions], month), roommates.map((r) => r.id));
+    const items = buildFixedSnapshot(
+      resolveFixedCharges([...versions], month),
+      roommates.map((r) => r.id),
+    );
     tx.set(ref, { month, managerId: cur.managerId ?? null, fixed: items }, { merge: true });
     for (const w of walletEntriesForFixed(month, items)) tx.set(doc(db, C.wallet, w.id), strip(w));
   });
 }
 
 /** Admin action: replace this month's fixed-charge snapshot with the currently effective charges. */
-export async function resnapshotMonth(month: string, roommates: Roommate[], versions: readonly FixedCharge[], actorId: string, staleWalletIds: string[] = [], onlyIfExists = false) {
+export async function resnapshotMonth(
+  month: string,
+  roommates: Roommate[],
+  versions: readonly FixedCharge[],
+  actorId: string,
+  staleWalletIds: string[] = [],
+  onlyIfExists = false,
+) {
   await runTransaction(db, async (tx) => {
     const ref = doc(db, C.months, month);
     const snap = await tx.get(ref);
     if (onlyIfExists && !(snap.data() as Partial<MonthDoc> | undefined)?.fixed) return;
-    const old = ((snap.data() as Partial<MonthDoc> | undefined)?.fixed ?? []) as FixedSnapshotItem[];
+    const old = ((snap.data() as Partial<MonthDoc> | undefined)?.fixed ??
+      []) as FixedSnapshotItem[];
     for (const w of walletEntriesForFixed(month, old)) tx.delete(doc(db, C.wallet, w.id));
     for (const id of staleWalletIds) tx.delete(doc(db, C.wallet, id));
-    const items = buildFixedSnapshot(resolveFixedCharges([...versions], month), roommates.map((r) => r.id));
+    const items = buildFixedSnapshot(
+      resolveFixedCharges([...versions], month),
+      roommates.map((r) => r.id),
+    );
     tx.set(ref, { month, fixed: items }, { merge: true });
     for (const w of walletEntriesForFixed(month, items)) tx.set(doc(db, C.wallet, w.id), strip(w));
     const a = audit(actorId, "resnapshot", "month", month, `Fixed charges re-applied for ${month}`);
@@ -210,11 +499,20 @@ export async function setManager(month: string, managerId: string, actorId: stri
   await batch.commit();
 }
 
-export async function addRate(r: { kind: UtilityKind; ratePaise: Paise; effectiveMonth: string; note: string }, actorId: string) {
+export async function addRate(
+  r: { kind: UtilityKind; ratePaise: Paise; effectiveMonth: string; note: string },
+  actorId: string,
+) {
   const batch = writeBatch(db);
   const ref = doc(collection(db, C.rates));
   batch.set(ref, { ...r, createdAtMs: now() });
-  const a = audit(actorId, "create", "rate", ref.id, `${r.kind} rate ₹${r.ratePaise / 100}/unit from ${r.effectiveMonth}`);
+  const a = audit(
+    actorId,
+    "create",
+    "rate",
+    ref.id,
+    `${r.kind} rate ₹${r.ratePaise / 100}/unit from ${r.effectiveMonth}`,
+  );
   batch.set(a.ref, a.data);
   await batch.commit();
 }
@@ -222,7 +520,13 @@ export async function addRate(r: { kind: UtilityKind; ratePaise: Paise; effectiv
 // ───────────── Vault, categories, settings, profile ─────────────
 
 /** A wallet allocation can only be written by its owner (enforced in firestore.rules). */
-export async function setAllocation(month: string, roommateId: string, amountPaise: Paise, previous: Paise, actorId: string) {
+export async function setAllocation(
+  month: string,
+  roommateId: string,
+  amountPaise: Paise,
+  previous: Paise,
+  actorId: string,
+) {
   const batch = writeBatch(db);
   const id = `${month}_${roommateId}`;
   batch.set(doc(db, C.allocations, id), { month, roommateId, amountPaise, updatedAtMs: now() });
@@ -243,12 +547,19 @@ export async function saveCategory(c: Category, actorId: string) {
 export const saveSettings = (s: Settings, actorId: string) => {
   const batch = writeBatch(db);
   batch.set(doc(db, C.settings, "household"), s, { merge: true });
-  const a = audit(actorId, "update", "settings", "household", `Carry-forward ${s.carryForward ? "on" : "off"}`);
+  const a = audit(
+    actorId,
+    "update",
+    "settings",
+    "household",
+    `Carry-forward ${s.carryForward ? "on" : "off"}`,
+  );
   batch.set(a.ref, a.data);
   return batch.commit();
 };
 
-export const updateMyUpi = (roommateId: string, upiId: string) => setDoc(doc(db, C.roommates, roommateId), { upiId }, { merge: true });
+export const updateMyUpi = (roommateId: string, upiId: string) =>
+  setDoc(doc(db, C.roommates, roommateId), { upiId }, { merge: true });
 
 export async function claimRoommate(uid: string, roommateId: string) {
   const batch = writeBatch(db);
@@ -272,16 +583,28 @@ export type FixedChargeInput = {
   active: boolean;
 };
 
-const slugKey = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "charge";
+const slugKey = (s: string) =>
+  s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "") || "charge";
 
 export function buildFixedVersion(input: FixedChargeInput, roommateIds: string[]): FixedCharge {
   const key = input.key ?? `${slugKey(input.name)}-${Date.now().toString(36)}`;
   const n = Math.max(1, roommateIds.length);
   const even = input.totalPaise % n === 0;
   return {
-    id: `${key}_${input.effectiveMonth}`, key, name: input.name.trim(), amountPaise: Math.floor(input.totalPaise / n), frequency: "monthly",
-    active: input.active, effectiveMonth: input.effectiveMonth, allocation: even ? "each" : "custom",
-    customShares: even ? {} : splitEqual(input.totalPaise, roommateIds), note: "Per person", createdAtMs: now(),
+    id: `${key}_${input.effectiveMonth}`,
+    key,
+    name: input.name.trim(),
+    amountPaise: Math.floor(input.totalPaise / n),
+    frequency: "monthly",
+    active: input.active,
+    effectiveMonth: input.effectiveMonth,
+    allocation: even ? "each" : "custom",
+    customShares: even ? {} : splitEqual(input.totalPaise, roommateIds),
+    note: "Per person",
+    createdAtMs: now(),
   };
 }
 
@@ -289,15 +612,30 @@ export function buildFixedVersion(input: FixedChargeInput, roommateIds: string[]
  * Saves a new version of a fixed charge and re-applies it to every already-created month from `effectiveMonth` up to the current month.
  * Older months are untouched, so history never changes. `versions` = all versions known now (defaults + saved).
  */
-export async function saveFixedCharge(input: FixedChargeInput, roommates: Roommate[], versions: readonly FixedCharge[], currentMonthStr: string, actorId: string) {
-  const version = buildFixedVersion(input, roommates.map((r) => r.id));
+export async function saveFixedCharge(
+  input: FixedChargeInput,
+  roommates: Roommate[],
+  versions: readonly FixedCharge[],
+  currentMonthStr: string,
+  actorId: string,
+) {
+  const version = buildFixedVersion(
+    input,
+    roommates.map((r) => r.id),
+  );
   const batch = writeBatch(db);
   batch.set(doc(db, C.fixed, version.id), strip(version));
-  const a = audit(actorId, "upsert", "fixedCharge", version.id, `${version.name} set to ₹${input.totalPaise / 100} (room total) from ${input.effectiveMonth}${input.active ? "" : " — stopped"}`);
+  const a = audit(
+    actorId,
+    "upsert",
+    "fixedCharge",
+    version.id,
+    `${version.name} set to ₹${input.totalPaise / 100} (room total) from ${input.effectiveMonth}${input.active ? "" : " — stopped"}`,
+  );
   batch.set(a.ref, a.data);
   await batch.commit();
   const next = [...versions.filter((v) => v.id !== version.id), version];
-  for (let m = input.effectiveMonth; m <= currentMonthStr; ) {
+  for (let m = input.effectiveMonth; m <= currentMonthStr;) {
     await resnapshotMonth(m, roommates, next, actorId, [], true);
     const [y = 0, mo = 1] = m.split("-").map(Number);
     m = mo === 12 ? `${y + 1}-01` : `${y}-${String(mo + 1).padStart(2, "0")}`;

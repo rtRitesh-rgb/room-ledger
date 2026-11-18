@@ -11,12 +11,14 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ExpensesRouteImport } from './routes/expenses'
+import { Route as GroceriesRouteImport } from './routes/groceries'
 import { Route as HouseholdRouteImport } from './routes/household'
 import { Route as ManagerRouteImport } from './routes/manager'
 import { Route as ProfileRouteImport } from './routes/profile'
 import { Route as RecordsRouteImport } from './routes/records'
 import { Route as SettlementRouteImport } from './routes/settlement'
 import { Route as UtilitiesRouteImport } from './routes/utilities'
+import { Route as ApiGrocerySearchRouteImport } from './routes/api.grocery-search'
 import { Route as ApiPushRouteImport } from './routes/api.push'
 
 const IndexRoute = IndexRouteImport.update({
@@ -27,6 +29,11 @@ const IndexRoute = IndexRouteImport.update({
 const ExpensesRoute = ExpensesRouteImport.update({
   id: '/expenses',
   path: '/expenses',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const GroceriesRoute = GroceriesRouteImport.update({
+  id: '/groceries',
+  path: '/groceries',
   getParentRoute: () => rootRouteImport,
 } as any)
 const HouseholdRoute = HouseholdRouteImport.update({
@@ -59,6 +66,11 @@ const UtilitiesRoute = UtilitiesRouteImport.update({
   path: '/utilities',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiGrocerySearchRoute = ApiGrocerySearchRouteImport.update({
+  id: '/api/grocery-search',
+  path: '/api/grocery-search',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiPushRoute = ApiPushRouteImport.update({
   id: '/api/push',
   path: '/api/push',
@@ -68,35 +80,41 @@ const ApiPushRoute = ApiPushRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/expenses': typeof ExpensesRoute
+  '/groceries': typeof GroceriesRoute
   '/household': typeof HouseholdRoute
   '/manager': typeof ManagerRoute
   '/profile': typeof ProfileRoute
   '/records': typeof RecordsRoute
   '/settlement': typeof SettlementRoute
   '/utilities': typeof UtilitiesRoute
+  '/api/grocery-search': typeof ApiGrocerySearchRoute
   '/api/push': typeof ApiPushRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/expenses': typeof ExpensesRoute
+  '/groceries': typeof GroceriesRoute
   '/household': typeof HouseholdRoute
   '/manager': typeof ManagerRoute
   '/profile': typeof ProfileRoute
   '/records': typeof RecordsRoute
   '/settlement': typeof SettlementRoute
   '/utilities': typeof UtilitiesRoute
+  '/api/grocery-search': typeof ApiGrocerySearchRoute
   '/api/push': typeof ApiPushRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/expenses': typeof ExpensesRoute
+  '/groceries': typeof GroceriesRoute
   '/household': typeof HouseholdRoute
   '/manager': typeof ManagerRoute
   '/profile': typeof ProfileRoute
   '/records': typeof RecordsRoute
   '/settlement': typeof SettlementRoute
   '/utilities': typeof UtilitiesRoute
+  '/api/grocery-search': typeof ApiGrocerySearchRoute
   '/api/push': typeof ApiPushRoute
 }
 export interface FileRouteTypes {
@@ -104,46 +122,54 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/expenses'
+    | '/groceries'
     | '/household'
     | '/manager'
     | '/profile'
     | '/records'
     | '/settlement'
     | '/utilities'
+    | '/api/grocery-search'
     | '/api/push'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/expenses'
+    | '/groceries'
     | '/household'
     | '/manager'
     | '/profile'
     | '/records'
     | '/settlement'
     | '/utilities'
+    | '/api/grocery-search'
     | '/api/push'
   id:
     | '__root__'
     | '/'
     | '/expenses'
+    | '/groceries'
     | '/household'
     | '/manager'
     | '/profile'
     | '/records'
     | '/settlement'
     | '/utilities'
+    | '/api/grocery-search'
     | '/api/push'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ExpensesRoute: typeof ExpensesRoute
+  GroceriesRoute: typeof GroceriesRoute
   HouseholdRoute: typeof HouseholdRoute
   ManagerRoute: typeof ManagerRoute
   ProfileRoute: typeof ProfileRoute
   RecordsRoute: typeof RecordsRoute
   SettlementRoute: typeof SettlementRoute
   UtilitiesRoute: typeof UtilitiesRoute
+  ApiGrocerySearchRoute: typeof ApiGrocerySearchRoute
   ApiPushRoute: typeof ApiPushRoute
 }
 
@@ -161,6 +187,13 @@ declare module '@tanstack/react-router' {
       path: '/expenses'
       fullPath: '/expenses'
       preLoaderRoute: typeof ExpensesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/groceries': {
+      id: '/groceries'
+      path: '/groceries'
+      fullPath: '/groceries'
+      preLoaderRoute: typeof GroceriesRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/household': {
@@ -205,6 +238,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof UtilitiesRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/grocery-search': {
+      id: '/api/grocery-search'
+      path: '/api/grocery-search'
+      fullPath: '/api/grocery-search'
+      preLoaderRoute: typeof ApiGrocerySearchRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/push': {
       id: '/api/push'
       path: '/api/push'
@@ -218,12 +258,14 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ExpensesRoute: ExpensesRoute,
+  GroceriesRoute: GroceriesRoute,
   HouseholdRoute: HouseholdRoute,
   ManagerRoute: ManagerRoute,
   ProfileRoute: ProfileRoute,
   RecordsRoute: RecordsRoute,
   SettlementRoute: SettlementRoute,
   UtilitiesRoute: UtilitiesRoute,
+  ApiGrocerySearchRoute: ApiGrocerySearchRoute,
   ApiPushRoute: ApiPushRoute,
 }
 export const routeTree = rootRouteImport

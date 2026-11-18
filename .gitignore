@@ -35,6 +35,7 @@ dist-ssr
 .env*
 
 serviceAccount*.json
+firebase-service-account*.json
 .env
 
 .vercel
