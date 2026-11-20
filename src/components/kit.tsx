@@ -120,8 +120,9 @@ export function PageHeader({ title, subtitle, action }: { title: string; subtitl
 
 export function StatCard({ label, value, hint, tone = "default" }: { label: string; value: ReactNode; hint?: string; tone?: "default" | "success" | "warning" | "danger" }) {
   const toneCls = { default: "", success: "text-success", warning: "text-warning-foreground dark:text-warning", danger: "text-destructive" }[tone];
+  const accent = { default: "", success: "border-l-4 border-l-success", warning: "border-l-4 border-l-warning", danger: "border-l-4 border-l-destructive" }[tone];
   return (
-    <div className="tile p-4">
+    <div className={cx("tile p-4", accent)}>
       <p className="text-xs font-medium text-muted-foreground">{label}</p>
       <p className={cx("num mt-1 truncate text-xl font-extrabold", toneCls)}>{value}</p>
       {hint ? <p className="mt-0.5 truncate text-xs text-muted-foreground">{hint}</p> : null}

@@ -15,12 +15,14 @@ import {
   Wallet,
   Download,
   ShoppingBasket,
+  Settings,
+  Zap,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Avatar, ErrorBlock, cx } from "./kit";
+import { Avatar, ErrorBlock, ResponsiveSheet, cx } from "./kit";
 import { DialogsProvider, useDialogs } from "./dialogs";
 import { LedgerProvider, useLedger } from "@/lib/data";
 import { C, claimRoommate, fromDoc } from "@/lib/db";
@@ -312,7 +314,8 @@ function MobileTab({ n }: { n: (typeof NAV)[number] }) {
 function AppFrame({ children }: { children: ReactNode }) {
   const { me, error } = useLedger();
   const { signOut } = useSession();
-  const { addExpense } = useDialogs();
+  const { addExpense, addUtility } = useDialogs();
+  const [quickAdd, setQuickAdd] = useState(false);
   return (
     <div className="min-h-dvh md:pl-64">
       <aside className="fixed inset-y-0 left-0 hidden w-64 flex-col border-r border-border bg-sidebar p-4 md:flex">
@@ -323,6 +326,10 @@ function AppFrame({ children }: { children: ReactNode }) {
         >
           <Plus className="size-4" />
           Add expense
+        </Button>
+        <Button onClick={addUtility} variant="outline" className="mt-2 h-11 justify-start gap-2">
+          <Zap className="size-4" />
+          Meter reading
         </Button>
         <nav className="mt-5 grid gap-1" aria-label="Primary">
           {SIDEBAR_NAV.map((n) => (
@@ -364,7 +371,14 @@ function AppFrame({ children }: { children: ReactNode }) {
         <div className="flex items-center gap-2">
           <NotificationBell />
           <InstallAppButton />
-          <ThemeToggle />
+          <Link
+            to="/household"
+            search={{ tab: "settings" }}
+            aria-label="Settings"
+            className="press grid size-11 place-items-center rounded-full border border-border bg-card hover:bg-muted"
+          >
+            <Settings className="size-4" />
+          </Link>
         </div>
       </header>
 
@@ -384,8 +398,9 @@ function AppFrame({ children }: { children: ReactNode }) {
         <div className="grid place-items-center pb-1.5">
           <button
             type="button"
-            onClick={addExpense}
-            aria-label="Add expense"
+            onClick={() => setQuickAdd(true)}
+            aria-label="Add"
+            aria-haspopup="dialog"
             className="bg-grad-primary press -mt-6 grid size-14 place-items-center rounded-full text-white shadow-lift ring-4 ring-background"
           >
             <Plus className="size-7" />
@@ -395,6 +410,34 @@ function AppFrame({ children }: { children: ReactNode }) {
           <MobileTab key={n.to} n={n} />
         ))}
       </nav>
+
+      <ResponsiveSheet open={quickAdd} onOpenChange={setQuickAdd} title="Add">
+        <div className="grid gap-2">
+          {[
+            { label: "Expense", hint: "Groceries, bills, anything you paid for", icon: Receipt, on: addExpense },
+            { label: "Meter reading", hint: "Electricity or gas units for the month", icon: Zap, on: addUtility },
+          ].map((a) => (
+            <button
+              key={a.label}
+              type="button"
+              onClick={() => {
+                setQuickAdd(false);
+                // let the sheet finish closing before the next dialog opens
+                window.setTimeout(a.on, 200);
+              }}
+              className="press flex min-h-16 items-center gap-3 rounded-2xl border border-border bg-card p-3 text-left hover:bg-muted"
+            >
+              <span className="bg-grad-primary grid size-11 shrink-0 place-items-center rounded-xl text-white">
+                <a.icon className="size-5" aria-hidden />
+              </span>
+              <span className="min-w-0">
+                <span className="block font-bold">{a.label}</span>
+                <span className="block text-xs text-muted-foreground">{a.hint}</span>
+              </span>
+            </button>
+          ))}
+        </div>
+      </ResponsiveSheet>
     </div>
   );
 }

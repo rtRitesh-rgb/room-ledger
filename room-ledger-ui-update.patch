@@ -1,0 +1,262 @@
+diff -ruN a/src/components/DailyLimit.tsx b/src/components/DailyLimit.tsx
+--- a/src/components/DailyLimit.tsx	2026-11-20 08:28:25.645721610 +0000
++++ b/src/components/DailyLimit.tsx	2026-11-20 08:28:25.646766954 +0000
+@@ -1,5 +1,5 @@
+ import { useEffect, useState } from "react";
+-import { Lock } from "lucide-react";
++import { Info, Lock } from "lucide-react";
+ import { ProgressBar, cx } from "./kit";
+ import { useLedger } from "@/lib/data";
+ import { dailyLimit, todayISO, vaultSummary } from "@/lib/ledger";
+@@ -18,33 +18,61 @@
+ export function DailyLimitCard({ onDark, className }: { onDark?: boolean; className?: string }) {
+   const { me, month, allocations, wallet, settings } = useLedger();
+   const [incFixed, setIncFixed] = useIncludeFixed();
++  const [info, setInfo] = useState(false);
+   if (!me) return null;
+   const v = vaultSummary(me.id, month, allocations, wallet, settings.carryForward);
+   const d = dailyLimit(v, wallet.filter((w) => w.roommateId === me.id), month, todayISO(), incFixed);
+   const muted = onDark ? "text-white/70" : "text-muted-foreground";
++  const strong = onDark ? "text-white" : "text-foreground";
+   const tone = d.status === "over" ? "over" : d.status === "near" ? "low" : "ok";
+   const label = !d.isCurrent ? (d.dayNo === 0 ? "Month not started" : "Month finished") : d.status === "unset" ? "Set your monthly wallet" : d.leftToday < 0 ? "Over today's limit" : d.status === "near" ? "Almost at today's limit" : "Left to spend today";
+   const used = d.allowanceToday > 0 ? d.spentToday / d.allowanceToday : d.spentToday > 0 ? 1 : 0;
++  const pct = Math.round(Math.min(used, 9.99) * 100);
+   const fixedCut = v.available - d.budget;
++  // What is still spendable this month, shared out over the days that remain (today included).
++  const pool = d.budget - (d.spentMonth - d.spentToday);
+ 
+   return (
+     <section className={cx(!onDark && "panel p-4", className)} aria-label="Daily spending limit">
+       <div className="flex items-center justify-between gap-2">
+-        <h2 className={cx("flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider", onDark ? "text-white/70" : "text-muted-foreground")}><Lock className="size-3" aria-hidden />Daily limit · only you</h2>
+-        <button type="button" role="switch" aria-checked={incFixed} onClick={() => setIncFixed(!incFixed)} className={cx("press h-8 rounded-full border px-2.5 text-[11px] font-semibold", onDark ? "border-white/25 text-white/85" : "border-border text-muted-foreground")}>{incFixed ? "Rent included" : "Rent excluded"}</button>
++        <h2 className={cx("flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider", muted)}><Lock className="size-3" aria-hidden />Daily limit · only you</h2>
++        <button
++          type="button"
++          role="switch"
++          aria-checked={incFixed}
++          aria-label="Count rent and fixed charges in the daily limit"
++          onClick={() => setIncFixed(!incFixed)}
++          className={cx("press flex h-8 items-center gap-2 rounded-full border pl-2.5 pr-1.5 text-[11px] font-semibold", onDark ? "border-white/25 text-white/85" : "border-border text-muted-foreground")}
++        >
++          {incFixed ? "Rent included" : "Rent excluded"}
++          <span aria-hidden className={cx("relative h-4 w-7 rounded-full transition-colors", incFixed ? "bg-primary" : onDark ? "bg-white/25" : "bg-muted-foreground/30")}>
++            <span className={cx("absolute top-0.5 size-3 rounded-full bg-white shadow transition-[left]", incFixed ? "left-[0.875rem]" : "left-0.5")} />
++          </span>
++        </button>
+       </div>
+       <p className={cx("num mt-1 text-3xl font-extrabold", d.leftToday < 0 && d.isCurrent && (onDark ? "text-[#ffb4c2]" : "text-destructive"))} aria-live="polite">{d.status === "unset" ? "—" : formatPaise(d.isCurrent ? d.leftToday : d.perDay)}</p>
+-      <p className={cx("text-xs", muted)}>{label}</p>
+-      <div className="mt-2.5"><ProgressBar value={used} tone={tone} /></div>
+-      <dl className={cx("num mt-2.5 grid grid-cols-3 gap-2 text-center text-[11px]", muted)}>
+-        <div><dt>Limit / day</dt><dd className={cx("mt-0.5 text-sm font-bold", onDark ? "text-white" : "text-foreground")}>{formatPaise(d.perDay)}</dd></div>
+-        <div><dt>Spent today</dt><dd className={cx("mt-0.5 text-sm font-bold", onDark ? "text-white" : "text-foreground")}>{formatPaise(d.spentToday)}</dd></div>
+-        <div><dt>Days left</dt><dd className={cx("mt-0.5 text-sm font-bold", onDark ? "text-white" : "text-foreground")}>{d.daysLeft}</dd></div>
++      <div className={cx("flex items-center justify-between gap-2 text-xs", muted)}>
++        <span>{label}</span>
++        {d.isCurrent && d.status !== "unset" ? <span className="num font-semibold">{pct}% used</span> : null}
++      </div>
++      <div className="mt-2 "><ProgressBar value={used} tone={tone} /></div>
++      <dl className={cx("num mt-3 grid grid-cols-3 gap-2 text-center text-[11px]", muted)}>
++        <div><dt>Today's limit</dt><dd className={cx("mt-0.5 text-sm font-bold", strong)}>{formatPaise(d.allowanceToday)}</dd></div>
++        <div><dt>Spent today</dt><dd className={cx("mt-0.5 text-sm font-bold", strong)}>{formatPaise(d.spentToday)}</dd></div>
++        <div><dt>Days left</dt><dd className={cx("mt-0.5 text-sm font-bold", strong)}>{d.daysLeft}</dd></div>
+       </dl>
+-      <p className={cx("num mt-2 text-[11px]", muted)}>
+-        {formatPaise(d.budget)} ÷ {d.days} days{fixedCut > 0 ? ` (after ${formatPaise(fixedCut)} rent & fixed)` : ""}. Re-spread daily: {formatPaise(d.allowanceToday)} today.
+-      </p>
++      {d.isCurrent && d.status !== "unset" ? (
++        <div className="mt-2">
++          <button type="button" aria-expanded={info} onClick={() => setInfo(!info)} className={cx("press -ml-1 flex h-8 items-center gap-1.5 rounded-lg px-1 text-[11px] font-semibold", onDark ? "text-white/80" : "text-primary")}>
++            <Info className="size-3.5" aria-hidden />How is this worked out?
++          </button>
++          {info ? (
++            <p className={cx("num mt-1 text-[11px] leading-relaxed", muted)}>
++              Today's limit = {formatPaise(Math.max(pool, 0))} still to spend this month ÷ {d.daysLeft} days left. Month budget is {formatPaise(d.budget)}{fixedCut > 0 ? ` (your ${formatPaise(v.available)} wallet minus ${formatPaise(fixedCut)} rent & fixed)` : ""}, planned at {formatPaise(d.perDay)} a day. Spend less today and tomorrow's limit grows; spend more and it shrinks.
++            </p>
++          ) : null}
++        </div>
++      ) : null}
+     </section>
+   );
+ }
+-
+diff -ruN a/src/components/Shell.tsx b/src/components/Shell.tsx
+--- a/src/components/Shell.tsx	2026-11-20 08:28:25.659589613 +0000
++++ b/src/components/Shell.tsx	2026-11-20 08:28:25.660766535 +0000
+@@ -15,12 +15,14 @@
+   Wallet,
+   Download,
+   ShoppingBasket,
++  Settings,
++  Zap,
+ } from "lucide-react";
+ import { toast } from "sonner";
+ import { Button } from "@/components/ui/button";
+ import { Input } from "@/components/ui/input";
+ import { Label } from "@/components/ui/label";
+-import { Avatar, ErrorBlock, cx } from "./kit";
++import { Avatar, ErrorBlock, ResponsiveSheet, cx } from "./kit";
+ import { DialogsProvider, useDialogs } from "./dialogs";
+ import { LedgerProvider, useLedger } from "@/lib/data";
+ import { C, claimRoommate, fromDoc } from "@/lib/db";
+@@ -312,7 +314,8 @@
+ function AppFrame({ children }: { children: ReactNode }) {
+   const { me, error } = useLedger();
+   const { signOut } = useSession();
+-  const { addExpense } = useDialogs();
++  const { addExpense, addUtility } = useDialogs();
++  const [quickAdd, setQuickAdd] = useState(false);
+   return (
+     <div className="min-h-dvh md:pl-64">
+       <aside className="fixed inset-y-0 left-0 hidden w-64 flex-col border-r border-border bg-sidebar p-4 md:flex">
+@@ -324,6 +327,10 @@
+           <Plus className="size-4" />
+           Add expense
+         </Button>
++        <Button onClick={addUtility} variant="outline" className="mt-2 h-11 justify-start gap-2">
++          <Zap className="size-4" />
++          Meter reading
++        </Button>
+         <nav className="mt-5 grid gap-1" aria-label="Primary">
+           {SIDEBAR_NAV.map((n) => (
+             <Link
+@@ -364,7 +371,14 @@
+         <div className="flex items-center gap-2">
+           <NotificationBell />
+           <InstallAppButton />
+-          <ThemeToggle />
++          <Link
++            to="/household"
++            search={{ tab: "settings" }}
++            aria-label="Settings"
++            className="press grid size-11 place-items-center rounded-full border border-border bg-card hover:bg-muted"
++          >
++            <Settings className="size-4" />
++          </Link>
+         </div>
+       </header>
+ 
+@@ -384,8 +398,9 @@
+         <div className="grid place-items-center pb-1.5">
+           <button
+             type="button"
+-            onClick={addExpense}
+-            aria-label="Add expense"
++            onClick={() => setQuickAdd(true)}
++            aria-label="Add"
++            aria-haspopup="dialog"
+             className="bg-grad-primary press -mt-6 grid size-14 place-items-center rounded-full text-white shadow-lift ring-4 ring-background"
+           >
+             <Plus className="size-7" />
+@@ -395,6 +410,34 @@
+           <MobileTab key={n.to} n={n} />
+         ))}
+       </nav>
++
++      <ResponsiveSheet open={quickAdd} onOpenChange={setQuickAdd} title="Add">
++        <div className="grid gap-2">
++          {[
++            { label: "Expense", hint: "Groceries, bills, anything you paid for", icon: Receipt, on: addExpense },
++            { label: "Meter reading", hint: "Electricity or gas units for the month", icon: Zap, on: addUtility },
++          ].map((a) => (
++            <button
++              key={a.label}
++              type="button"
++              onClick={() => {
++                setQuickAdd(false);
++                // let the sheet finish closing before the next dialog opens
++                window.setTimeout(a.on, 200);
++              }}
++              className="press flex min-h-16 items-center gap-3 rounded-2xl border border-border bg-card p-3 text-left hover:bg-muted"
++            >
++              <span className="bg-grad-primary grid size-11 shrink-0 place-items-center rounded-xl text-white">
++                <a.icon className="size-5" aria-hidden />
++              </span>
++              <span className="min-w-0">
++                <span className="block font-bold">{a.label}</span>
++                <span className="block text-xs text-muted-foreground">{a.hint}</span>
++              </span>
++            </button>
++          ))}
++        </div>
++      </ResponsiveSheet>
+     </div>
+   );
+ }
+diff -ruN a/src/components/kit.tsx b/src/components/kit.tsx
+--- a/src/components/kit.tsx	2026-11-20 08:28:25.652843243 +0000
++++ b/src/components/kit.tsx	2026-11-20 08:28:25.653899958 +0000
+@@ -120,8 +120,9 @@
+ 
+ export function StatCard({ label, value, hint, tone = "default" }: { label: string; value: ReactNode; hint?: string; tone?: "default" | "success" | "warning" | "danger" }) {
+   const toneCls = { default: "", success: "text-success", warning: "text-warning-foreground dark:text-warning", danger: "text-destructive" }[tone];
++  const accent = { default: "", success: "border-l-4 border-l-success", warning: "border-l-4 border-l-warning", danger: "border-l-4 border-l-destructive" }[tone];
+   return (
+-    <div className="tile p-4">
++    <div className={cx("tile p-4", accent)}>
+       <p className="text-xs font-medium text-muted-foreground">{label}</p>
+       <p className={cx("num mt-1 truncate text-xl font-extrabold", toneCls)}>{value}</p>
+       {hint ? <p className="mt-0.5 truncate text-xs text-muted-foreground">{hint}</p> : null}
+diff -ruN a/src/routes/index.tsx b/src/routes/index.tsx
+--- a/src/routes/index.tsx	2026-11-20 08:28:25.706068520 +0000
++++ b/src/routes/index.tsx	2026-11-20 08:28:25.707471989 +0000
+@@ -1,7 +1,7 @@
+ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+ import { useMemo } from "react";
+ import { Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+-import { ArrowRight, Flame, HandCoins, Plus, Zap } from "lucide-react";
++import { ArrowRight, Flame, HandCoins, Plus, ShoppingBasket, Zap } from "lucide-react";
+ import { Button } from "@/components/ui/button";
+ import { Avatar, EmptyState, LoadingBlock, Money, MonthSwitcher, ProgressBar, StatCard, StatusBadge, cx } from "@/components/kit";
+ import { CategoryChip } from "@/components/CategoryPicker";
+@@ -64,15 +64,15 @@
+ 
+   return (
+     <div className="space-y-5">
+-      <section className="hero bg-grad-hero rounded-3xl p-4 shadow-lift md:p-7" aria-label="Your wallet">
++      <section className="hero bg-grad-hero rounded-3xl p-5 shadow-lift md:p-7" aria-label="Your wallet">
+         <div className="relative flex flex-wrap items-start justify-between gap-3">
+-          <div><p className="text-sm text-white/75">{greet}, {me?.name}</p><p className="text-xs text-white/60">{monthLabel(month)}</p></div>
++          <p className="text-base font-semibold text-white/85">{greet}, {me?.name}</p>
+           <MonthSwitcher className="!border-white/20 !bg-white/10 text-white [&_button:hover]:!bg-white/15" />
+         </div>
+-        <div className="relative mt-5">
++        <div className="relative mt-8">
+           <p className="text-xs font-semibold uppercase tracking-wider text-white/70">My wallet left</p>
+           <p className="num text-4xl font-extrabold md:text-5xl" aria-live="polite">{formatPaise(vault?.remaining ?? 0)}</p>
+-          <div className="mt-3 max-w-md">
++          <div className="mt-4 max-w-md">
+             <ProgressBar value={vault?.utilisation === Infinity ? 1 : (vault?.utilisation ?? 0)} tone={vault?.status ?? "ok"} />
+             <div className="num mt-1.5 flex justify-between text-xs text-white/75">
+               <span>{formatPaise(vault?.spent ?? 0)} of {formatPaise(vault?.available ?? 0)} used</span>
+@@ -87,20 +87,20 @@
+       <section className="grid grid-cols-3 gap-2" aria-label="Quick actions">
+         {[
+           { label: "Expense", icon: Plus, on: addExpense },
+-          { label: "Meter", icon: Zap, on: addUtility },
++          { label: "Grocery", icon: ShoppingBasket, to: "/groceries" as const },
+           { label: "Pay / Settle", icon: HandCoins, on: () => { const b = myOpen.find((x) => x.fromId === me?.id); if (b) pay(b); else void navigate({ to: "/settlement" }); } },
+-        ].map((a) => (
+-          <button key={a.label} type="button" onClick={a.on} className="tile press flex min-h-[4.5rem] flex-col items-center justify-center gap-1.5 text-xs font-semibold hover:bg-muted">
+-            <a.icon className="size-5 text-primary" aria-hidden />{a.label}
+-          </button>
+-        ))}
++        ].map((a) => {
++          const cls = "tile press flex min-h-[4.5rem] flex-col items-center justify-center gap-1.5 text-xs font-semibold hover:bg-muted";
++          const inner = <><a.icon className="size-5 text-primary" aria-hidden />{a.label}</>;
++          return a.to ? <Link key={a.label} to={a.to} className={cls}>{inner}</Link> : <button key={a.label} type="button" onClick={a.on} className={cls}>{inner}</button>;
++        })}
+       </section>
+ 
+       <section className="grid grid-cols-2 gap-3 md:grid-cols-4" aria-label="Financial overview">
+-        <StatCard label="Household spending" value={<Money paise={calc.household} />} hint="Shared & utility bills" />
+-        <StatCard label="Your share" value={<Money paise={myStats?.total ?? 0} />} hint="Incl. personal" />
+         <StatCard label="You owe" value={<Money paise={calc.owe} />} tone={calc.owe > 0 ? "warning" : "default"} hint={calc.owe > 0 ? "Pending" : "All clear"} />
+         <StatCard label="You are owed" value={<Money paise={calc.owed} />} tone={calc.owed > 0 ? "success" : "default"} hint={calc.owed > 0 ? "To receive" : "Nothing pending"} />
++        <StatCard label="Household spending" value={<Money paise={calc.household} />} hint="Shared & utility bills" />
++        <StatCard label="Your share" value={<Money paise={myStats?.total ?? 0} />} hint="Incl. personal" />
+       </section>
+ 
+       <div className="grid gap-5 lg:grid-cols-2">

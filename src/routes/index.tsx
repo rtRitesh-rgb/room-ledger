@@ -1,7 +1,7 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useMemo } from "react";
 import { Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { ArrowRight, Flame, HandCoins, Plus, Zap } from "lucide-react";
+import { ArrowRight, Flame, HandCoins, Plus, ShoppingBasket, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Avatar, EmptyState, LoadingBlock, Money, MonthSwitcher, ProgressBar, StatCard, StatusBadge, cx } from "@/components/kit";
 import { CategoryChip } from "@/components/CategoryPicker";
@@ -64,15 +64,15 @@ function HomePage() {
 
   return (
     <div className="space-y-5">
-      <section className="hero bg-grad-hero rounded-3xl p-4 shadow-lift md:p-7" aria-label="Your wallet">
+      <section className="hero bg-grad-hero rounded-3xl p-5 shadow-lift md:p-7" aria-label="Your wallet">
         <div className="relative flex flex-wrap items-start justify-between gap-3">
-          <div><p className="text-sm text-white/75">{greet}, {me?.name}</p><p className="text-xs text-white/60">{monthLabel(month)}</p></div>
+          <p className="text-base font-semibold text-white/85">{greet}, {me?.name}</p>
           <MonthSwitcher className="!border-white/20 !bg-white/10 text-white [&_button:hover]:!bg-white/15" />
         </div>
-        <div className="relative mt-5">
+        <div className="relative mt-8">
           <p className="text-xs font-semibold uppercase tracking-wider text-white/70">My wallet left</p>
           <p className="num text-4xl font-extrabold md:text-5xl" aria-live="polite">{formatPaise(vault?.remaining ?? 0)}</p>
-          <div className="mt-3 max-w-md">
+          <div className="mt-4 max-w-md">
             <ProgressBar value={vault?.utilisation === Infinity ? 1 : (vault?.utilisation ?? 0)} tone={vault?.status ?? "ok"} />
             <div className="num mt-1.5 flex justify-between text-xs text-white/75">
               <span>{formatPaise(vault?.spent ?? 0)} of {formatPaise(vault?.available ?? 0)} used</span>
@@ -87,20 +87,20 @@ function HomePage() {
       <section className="grid grid-cols-3 gap-2" aria-label="Quick actions">
         {[
           { label: "Expense", icon: Plus, on: addExpense },
-          { label: "Meter", icon: Zap, on: addUtility },
+          { label: "Grocery", icon: ShoppingBasket, to: "/groceries" as const },
           { label: "Pay / Settle", icon: HandCoins, on: () => { const b = myOpen.find((x) => x.fromId === me?.id); if (b) pay(b); else void navigate({ to: "/settlement" }); } },
-        ].map((a) => (
-          <button key={a.label} type="button" onClick={a.on} className="tile press flex min-h-[4.5rem] flex-col items-center justify-center gap-1.5 text-xs font-semibold hover:bg-muted">
-            <a.icon className="size-5 text-primary" aria-hidden />{a.label}
-          </button>
-        ))}
+        ].map((a) => {
+          const cls = "tile press flex min-h-[4.5rem] flex-col items-center justify-center gap-1.5 text-xs font-semibold hover:bg-muted";
+          const inner = <><a.icon className="size-5 text-primary" aria-hidden />{a.label}</>;
+          return a.to ? <Link key={a.label} to={a.to} className={cls}>{inner}</Link> : <button key={a.label} type="button" onClick={a.on} className={cls}>{inner}</button>;
+        })}
       </section>
 
       <section className="grid grid-cols-2 gap-3 md:grid-cols-4" aria-label="Financial overview">
-        <StatCard label="Household spending" value={<Money paise={calc.household} />} hint="Shared & utility bills" />
-        <StatCard label="Your share" value={<Money paise={myStats?.total ?? 0} />} hint="Incl. personal" />
         <StatCard label="You owe" value={<Money paise={calc.owe} />} tone={calc.owe > 0 ? "warning" : "default"} hint={calc.owe > 0 ? "Pending" : "All clear"} />
         <StatCard label="You are owed" value={<Money paise={calc.owed} />} tone={calc.owed > 0 ? "success" : "default"} hint={calc.owed > 0 ? "To receive" : "Nothing pending"} />
+        <StatCard label="Household spending" value={<Money paise={calc.household} />} hint="Shared & utility bills" />
+        <StatCard label="Your share" value={<Money paise={myStats?.total ?? 0} />} hint="Incl. personal" />
       </section>
 
       <div className="grid gap-5 lg:grid-cols-2">
