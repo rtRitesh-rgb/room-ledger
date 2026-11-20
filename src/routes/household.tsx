@@ -1,6 +1,6 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useState, type ReactNode } from "react";
-import { ChevronDown, ChevronUp, Lock, Pencil, Plus } from "lucide-react";
+import { ChevronDown, ChevronRight, ChevronUp, Lock, Pencil, Plus, ShoppingBasket } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -308,6 +308,13 @@ function SettingsTab(): ReactNode {
   const [upi, setUpi] = useState(me?.upiId ?? "");
   return (
     <div className="space-y-4">
+      <section className="panel p-2">
+        <Link to="/groceries" className="press flex min-h-14 items-center gap-3 rounded-xl p-2 hover:bg-muted">
+          <span className="bg-grad-primary grid size-10 shrink-0 place-items-center rounded-xl text-white"><ShoppingBasket className="size-5" aria-hidden /></span>
+          <span className="min-w-0 flex-1"><span className="block font-bold">Smart Grocery Finder</span><span className="block text-xs text-muted-foreground">Compare prices across apps and keep a shared shopping list</span></span>
+          <ChevronRight className="size-5 shrink-0 text-muted-foreground" aria-hidden />
+        </Link>
+      </section>
       <section className="panel space-y-4 p-4">
         <h2 className="font-bold">Wallet</h2>
         <div className="flex items-center justify-between gap-4"><div><Label htmlFor="carry">Carry unused balance into next month</Label><p className="text-xs text-muted-foreground">Off by default. When on, leftover (or overspent) vault balance rolls forward. Balances are always recomputed from the ledger, so toggling is reversible.</p></div><Switch id="carry" checked={settings.carryForward} disabled={!isAdmin} onCheckedChange={(v) => void run(() => saveSettings({ carryForward: v }, me!.id), "Setting saved")} /></div>

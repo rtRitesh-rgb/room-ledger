@@ -1,8 +1,8 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { collection, onSnapshot, orderBy, query } from "firebase/firestore";
 import { Geolocation } from "@capacitor/geolocation";
 import { useEffect, useMemo, useState } from "react";
-import { ExternalLink, Loader2, MapPin, Search, ShoppingBasket, Trash2 } from "lucide-react";
+import { ChevronLeft, ExternalLink, Loader2, MapPin, Search, ShoppingBasket, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -266,6 +266,14 @@ function GroceriesPage() {
 
   return (
     <div>
+      <Link
+        to="/household"
+        search={{ tab: "settings" }}
+        className="press -ml-1 mb-2 inline-flex h-10 items-center gap-1 rounded-lg px-1 text-sm font-semibold text-primary"
+      >
+        <ChevronLeft className="size-4" aria-hidden />
+        Settings
+      </Link>
       <PageHeader
         title="Smart Grocery Finder"
         subtitle="Compare nearby prices, build your shared list, and record purchases."

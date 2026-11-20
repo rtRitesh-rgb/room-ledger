@@ -200,6 +200,7 @@
 @keyframes pop { from { transform: scale(0.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 
 .pb-safe { padding-bottom: max(env(safe-area-inset-bottom), 0px); }
+.pt-safe { padding-top: calc(0.5rem + env(safe-area-inset-top, 0px)); }
 .sheet-pad { padding-bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px)); }
 
 @media (prefers-reduced-motion: reduce) {

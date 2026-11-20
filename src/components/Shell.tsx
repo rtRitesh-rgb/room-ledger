@@ -34,10 +34,16 @@ import type { Roommate } from "@/lib/ledger";
 
 const NAV = [
   { to: "/", label: "Home", icon: Home },
-  { to: "/groceries", label: "Grocery", icon: ShoppingBasket },
   { to: "/expenses", label: "Expenses", icon: Receipt },
   { to: "/settlement", label: "Settle Up", icon: HandCoins },
-  { to: "/household", label: "Wallet", icon: Users },
+  { to: "/household", label: "Household", icon: Users },
+] as const;
+
+/** Desktop sidebar has room, so Grocery stays one click away there. On mobile it lives in Household → Settings. */
+const SIDEBAR_NAV = [
+  ...NAV.slice(0, 2),
+  { to: "/groceries", label: "Grocery", icon: ShoppingBasket },
+  ...NAV.slice(2),
 ] as const;
 
 export function ThemeToggle({ full }: { full?: boolean }) {
@@ -319,7 +325,7 @@ function AppFrame({ children }: { children: ReactNode }) {
           Add expense
         </Button>
         <nav className="mt-5 grid gap-1" aria-label="Primary">
-          {NAV.map((n) => (
+          {SIDEBAR_NAV.map((n) => (
             <Link
               key={n.to}
               to={n.to}
@@ -353,7 +359,7 @@ function AppFrame({ children }: { children: ReactNode }) {
         </div>
       </aside>
 
-      <header className="sticky top-0 z-30 flex items-center justify-between border-b border-border bg-background/90 px-4 py-2 backdrop-blur md:hidden">
+      <header className="pt-safe sticky top-0 z-30 flex items-center justify-between border-b border-border bg-background/90 px-4 pb-2 backdrop-blur md:hidden">
         <Brand />
         <div className="flex items-center gap-2">
           <NotificationBell />
@@ -369,7 +375,7 @@ function AppFrame({ children }: { children: ReactNode }) {
       </main>
 
       <nav
-        className="pb-safe fixed inset-x-0 bottom-0 z-30 grid grid-cols-6 items-end border-t border-border bg-card/95 backdrop-blur md:hidden"
+        className="pb-safe fixed inset-x-0 bottom-0 z-30 grid grid-cols-5 items-end border-t border-border bg-card/95 backdrop-blur md:hidden"
         aria-label="Primary"
       >
         {NAV.slice(0, 2).map((n) => (
